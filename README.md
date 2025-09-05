@@ -1,2 +1,9 @@
-# goblin-solana-agent
-This is a public sandbox repository for a Solana agent that autonomously manages transactions and integrates with a language model for planning and goal execution.
+# Goblin Solana Agent — Sandbox
+A public sandbox for an autonomous Solana agent that plans with an LLM and executes on-chain goals.
+
+**Bucket:** Off-Chain Smarts (platform-agnostic)  
+**Status:** PILOT (DEV)
+
+- Overview → /docs/OVERVIEW.md  
+- Architecture → /docs/ARCHITECTURE.md  
+- Runbook → /ops/RUNBOOK.md
