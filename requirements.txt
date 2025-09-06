@@ -1,0 +1,6 @@
+slack_bolt
+openai
+solana-py
+requests
+streamlit
+dotenv
