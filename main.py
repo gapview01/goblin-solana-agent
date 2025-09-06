@@ -2,7 +2,7 @@
 import os
 from dotenv import load_dotenv
 
-from chat.slack_bot import create_app
+from chat.slack_agent import create_app
 from planner.planner import plan
 from wallet.solana_wallet import get_balance
 from tools.defi_agent import fetch_opportunities
