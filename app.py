@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import os
 import threading
 import requests
+from wallet.agent_wallet import stake_sol, unstake_sol
 
 # OpenAI: current client pattern
 try:
@@ -19,6 +20,24 @@ app = Flask(__name__)
 @app.route("/ping")
 def ping():
     return "pong", 200
+
+
+@app.route("/stake", methods=["POST"])
+def stake_handler():
+    data = request.get_json(force=True)
+    protocol = data.get("protocol")
+    amount_lamports = data.get("amountLamports")
+    result = stake_sol(protocol, int(amount_lamports))
+    return jsonify(result), 200
+
+
+@app.route("/unstake", methods=["POST"])
+def unstake_handler():
+    data = request.get_json(force=True)
+    protocol = data.get("protocol")
+    amount_lamports = data.get("amountLamports")
+    result = unstake_sol(protocol, int(amount_lamports))
+    return jsonify(result), 200
 
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
