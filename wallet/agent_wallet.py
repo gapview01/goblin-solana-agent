@@ -85,9 +85,13 @@ def send_sol(recipient: str, amount: float) -> Dict:
     return {"signature": signature, "requires_human_approval": False}
 
 
-def swap_tokens(from_mint: str, to_mint: str, amount: float) -> Dict:
-    """Swap tokens using Jupiter's quote/swap API."""
-    if _requires_human_approval(amount):
+def swap_tokens(from_mint: str, to_mint: str, amount: float, force: bool = False) -> Dict:
+    """Swap tokens using Jupiter's quote/swap API.
+
+    The ``force`` flag bypasses the human-approval threshold and should only be
+    used by a trusted executor after an out-of-band approval step.
+    """
+    if not force and _requires_human_approval(amount):
         return {"requires_human_approval": True}
 
     amount_lamports = int(amount * LAMPORTS_PER_SOL)
