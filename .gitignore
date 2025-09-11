@@ -17,3 +17,16 @@ coverage/
 .DS_Store
 .idea/
 .vscode/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Wallet/private keys (do NOT commit)
+agent-keypair.json
+agent-keypair-*.json
+*.pem
+*.key
