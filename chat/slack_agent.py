@@ -1,40 +1,43 @@
 """Slack bot that plans actions based on user goals."""
 from __future__ import annotations
 
+import os
 from typing import Dict
-
+from flask import Flask, request, jsonify
 from slack_bolt import App
+from slack_bolt.adapter.flask import SlackRequestHandler
+from dotenv import load_dotenv
 
 from planner.planner import plan
+
+# Load environment variables
+load_dotenv()
 
 # In-memory store mapping user IDs to their latest goal
 USER_GOALS: Dict[str, str] = {}
 
+def create_app(token: str, signing_secret: str) -> Flask:
+    """Create and return a Flask app wrapping the Slack Bolt app."""
+    bolt_app = App(token=token, signing_secret=signing_secret)
+    handler = SlackRequestHandler(bolt_app)
+    flask_app = Flask(__name__)
 
-def create_app(token: str, signing_secret: str) -> App:
-    """Create a Slack Bolt app that handles the /goblin slash command.
+    @flask_app.route("/ping")
+    def ping():
+        return "pong", 200
 
-    Parameters
-    ----------
-    token: str
-        Slack bot token.
-    signing_secret: str
-        Slack signing secret.
 
-    Returns
-    -------
-    App
-        Configured Slack Bolt application.
-    """
-    app = App(token=token, signing_secret=signing_secret)
+    # Route for Slack event subscriptions (e.g. verification + messages)
+    @flask_app.route("/slack/events", methods=["POST"])
+    def slack_events():
+        data = request.get_json(force=True)
+        if data and data.get("type") == "url_verification":
+            return jsonify({"challenge": data["challenge"]})
+        return handler.handle(request)
 
-    @app.command("/goblin")
+    # Slash command handler (e.g. /goblin)
+    @bolt_app.command("/goblin")
     def handle_goblin(ack, respond, command):
-        """Handle the /goblin slash command.
-
-        The command text is stored as the user's goal and sent to the LLM
-        planner. A summary of the plan is then posted back to Slack.
-        """
         ack()
         user_id = command.get("user_id")
         text = command.get("text", "").strip()
@@ -42,8 +45,8 @@ def create_app(token: str, signing_secret: str) -> App:
             USER_GOALS[user_id] = text
         try:
             plan_summary = plan(text)
-        except Exception as exc:  # pragma: no cover - network errors
+        except Exception as exc:
             plan_summary = f"Planning failed: {exc}"
         respond(plan_summary)
 
-    return app
+    return flask_app
