@@ -16,10 +16,18 @@ from solana.keypair import Keypair
 from solana.publickey import PublicKey
 from solana.rpc.api import Client
 from solana.system_program import TransferParams, transfer
-from solana.transaction import Transaction
+from solana.transaction import Transaction, TransactionInstruction
 
 LAMPORTS_PER_SOL = 1_000_000_000
 APPROVAL_THRESHOLD = 5
+
+# Official program IDs for supported staking protocols
+PROTOCOL_PROGRAM_IDS = {
+    "marinade": "MarBmsSgKXdrN1egZf5sqe1TMai9K1rChYNDJgjq7aD",
+    # Jito and SolBlaze use the SPL Stake Pool program
+    "jito": "SPoo1Ku8WFXoNDMHPsrGSTSG1Y47rzgn41SLUNakuHy",
+    "solblaze": "SPoo1Ku8WFXoNDMHPsrGSTSG1Y47rzgn41SLUNakuHy",
+}
 
 load_dotenv()
 
@@ -108,16 +116,58 @@ def swap_tokens(from_mint: str, to_mint: str, amount: float, force: bool = False
     return {"signature": signature, "requires_human_approval": False}
 
 
-def stake_tokens(protocol: str, amount: float) -> Dict:
-    """Stake ``amount`` of SOL with a given ``protocol``.
+def stake_sol(protocol: str, amount_lamports: int) -> Dict:
+    """Stake ``amount_lamports`` of SOL with a given ``protocol``.
 
-    This is a placeholder implementation – integrate with specific staking
-    protocols as needed.
+    The transaction is simulated before submission. Any amount greater than
+    ``APPROVAL_THRESHOLD`` SOL returns ``requiresApproval``.
     """
-    if _requires_human_approval(amount):
-        return {"requires_human_approval": True}
+    if protocol not in PROTOCOL_PROGRAM_IDS:
+        raise ValueError("unsupported protocol")
 
-    return {
-        "status": f"staked {amount} SOL with {protocol}",
-        "requires_human_approval": False,
-    }
+    amount_sol = amount_lamports / LAMPORTS_PER_SOL
+    if _requires_human_approval(amount_sol):
+        return {"requiresApproval": True}
+
+    tx = Transaction()
+    ix = TransactionInstruction(
+        program_id=PublicKey(PROTOCOL_PROGRAM_IDS[protocol]),
+        keys=[],
+        data=b"",
+    )
+    tx.add(ix)
+
+    sim = CLIENT.simulate_transaction(tx, KEYPAIR)
+    if sim.get("result", {}).get("err"):
+        return {"simulationError": sim["result"]["err"], "requiresApproval": False}
+
+    sig = CLIENT.send_transaction(tx, KEYPAIR)["result"]
+    return {"signature": sig, "requiresApproval": False}
+
+
+def unstake_sol(protocol: str, amount_lamports: int) -> Dict:
+    """Unstake ``amount_lamports`` of SOL from a given ``protocol``.
+
+    Follows the same safety and simulation checks as ``stake_sol``.
+    """
+    if protocol not in PROTOCOL_PROGRAM_IDS:
+        raise ValueError("unsupported protocol")
+
+    amount_sol = amount_lamports / LAMPORTS_PER_SOL
+    if _requires_human_approval(amount_sol):
+        return {"requiresApproval": True}
+
+    tx = Transaction()
+    ix = TransactionInstruction(
+        program_id=PublicKey(PROTOCOL_PROGRAM_IDS[protocol]),
+        keys=[],
+        data=b"",
+    )
+    tx.add(ix)
+
+    sim = CLIENT.simulate_transaction(tx, KEYPAIR)
+    if sim.get("result", {}).get("err"):
+        return {"simulationError": sim["result"]["err"], "requiresApproval": False}
+
+    sig = CLIENT.send_transaction(tx, KEYPAIR)["result"]
+    return {"signature": sig, "requiresApproval": False}
