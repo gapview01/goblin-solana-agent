@@ -1,64 +1,66 @@
-import express from 'express';
-import { Keypair, PublicKey } from '@solana/web3.js';
-import bs58 from 'bs58';
-import axios from 'axios';
+// executor-node/index.js
+import express from "express";
+import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import bs58 from "bs58";
 
-const { RPC_URL, AGENT_SECRET_B58 } = process.env;
+const RPC_URL = process.env.RPC_URL || "";
+const AGENT_SECRET_B58 = process.env.AGENT_SECRET_B58 || "";
 
-if (!RPC_URL) {
-  console.error('RPC_URL environment variable is required');
-  process.exit(1);
-}
+// Initialize connection + wallet, but DO NOT crash the process on boot.
+// This lets Cloud Run hit /health even if misconfigured.
+let conn = null;
+let wallet = null;
 
-if (!AGENT_SECRET_B58) {
-  console.error('AGENT_SECRET_B58 environment variable is required');
-  process.exit(1);
-}
-
-let keypair;
 try {
-  const secret = bs58.decode(AGENT_SECRET_B58);
-  keypair = Keypair.fromSecretKey(secret);
-} catch (err) {
-  console.error('Failed to decode AGENT_SECRET_B58:', err.message);
-  process.exit(1);
+  if (!RPC_URL) throw new Error("Missing RPC_URL");
+  if (!AGENT_SECRET_B58) throw new Error("Missing AGENT_SECRET_B58");
+
+  conn = new Connection(RPC_URL, "confirmed");
+  wallet = Keypair.fromSecretKey(bs58.decode(AGENT_SECRET_B58));
+} catch (e) {
+  console.error("Startup warning:", e.message);
 }
 
 const app = express();
 app.use(express.json());
 
-app.get('/health', (req, res) => {
-  res.json({ ok: true, pubkey: keypair.publicKey.toBase58() });
+// Always available; reports whether the executor is ready.
+app.get("/health", (_req, res) => {
+  const ok = Boolean(conn && wallet);
+  res.status(ok ? 200 : 503).json({
+    ok,
+    hasRPC: Boolean(RPC_URL),
+    hasKey: Boolean(AGENT_SECRET_B58),
+    pubkey: wallet?.publicKey?.toBase58() || null,
+  });
 });
 
-app.post('/balance', async (req, res) => {
-  const { pubkey } = req.body || {};
-  if (!pubkey) {
-    return res.status(400).json({ error: 'pubkey required' });
-  }
-
+// Get balance for a given pubkey OR the agent wallet by default.
+// Accepts GET /balance?pubkey=... or POST { pubkey }
+app.all("/balance", async (req, res) => {
   try {
-    const pk = new PublicKey(pubkey);
-    const { data } = await axios.post(RPC_URL, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'getBalance',
-      params: [pk.toBase58()]
+    if (!conn || !wallet) throw new Error("Executor not initialized");
+
+    const bodyPk = req.body?.pubkey;
+    const queryPk = req.query?.pubkey;
+    const target = (bodyPk || queryPk || wallet.publicKey.toBase58()).toString();
+
+    const pubkey = new PublicKey(target);
+    const lamports = await conn.getBalance(pubkey, "confirmed");
+
+    return res.json({
+      pubkey: pubkey.toBase58(),
+      lamports,
+      sol: lamports / 1_000_000_000,
     });
-
-    const lamports = data?.result?.value;
-    if (typeof lamports !== 'number') {
-      return res.status(502).json({ error: 'invalid RPC response' });
-    }
-
-    res.json({ pubkey: pk.toBase58(), lamports });
-  } catch (err) {
-    console.error('Error fetching balance:', err.message);
-    res.status(500).json({ error: 'failed to fetch balance' });
+  } catch (e) {
+    console.error("Balance error:", e.message);
+    return res.status(400).json({ error: String(e) });
   }
 });
 
-const PORT = 8080;
+// IMPORTANT: Cloud Run expects us to bind to PORT (defaults to 8080)
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`Executor listening on port ${PORT}`);
+  console.log("Executor running on", PORT);
 });
