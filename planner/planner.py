@@ -1,10 +1,14 @@
-"""Simple OpenAI planner logic placeholder."""
-import os
 from openai import OpenAI
 
+client = OpenAI()  # uses OPENAI_API_KEY from env
 
-def plan(prompt: str) -> str:
-    """Call OpenAI to generate a plan from a prompt."""
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    response = client.responses.create(model="gpt-4.1-mini", input=prompt)
-    return response.output[0].content[0].text
+resp = client.chat.completions.create(
+    model="gpt-5",                     # or gpt-5-mini / gpt-5-nano
+    messages=[
+        {"role":"system","content":"You are a concise planning assistant."},
+        {"role":"user","content":"Give me a 5-step plan to grow 1 SOL to 10 SOL."}
+    ],
+    reasoning_effort="minimal",        # optional: minimal | medium | high
+    verbosity="low"                    # optional: low | medium | high
+)
+print(resp.choices[0].message.content)
