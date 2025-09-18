@@ -23,7 +23,38 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-app = Application.builder().token(TOKEN).build()
+# ---------- self-heal webhook (runs once at startup)
+async def reconcile_webhook(app: Application):
+    """
+    Ensure Telegram's webhook points to THIS service. If it's blank or wrong,
+    set it. Never crash the container if this fails.
+    """
+    try:
+        if not BASE_URL:
+            logging.info("Webhook reconcile: BASE_URL unset; skipping")
+            return
+        expected = f"{BASE_URL}/webhook/{WEBHOOK_SECRET}"
+        info = await app.bot.get_webhook_info()
+        current = info.url or ""
+        if current != expected:
+            await app.bot.set_webhook(
+                url=expected,
+                secret_token=WEBHOOK_SECRET,
+                drop_pending_updates=True,
+            )
+            logging.info("Webhook reconciled: %r -> %r", current, expected)
+        else:
+            logging.info("Webhook already correct: %r", expected)
+    except Exception:
+        logging.exception("Webhook reconcile failed; continuing anyway")
+
+# Build the app and attach the reconcile hook
+app = (
+    Application.builder()
+    .token(TOKEN)
+    .post_init(reconcile_webhook)   # <- self-heal on startup
+    .build()
+)
 
 # ---------- helpers
 async def _call_planner(goal: str) -> str:
