@@ -6,12 +6,6 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters
 )
 
-# --- Planner import (shared with Slack)
-try:
-    from planner.planner import plan as llm_plan
-except Exception:
-    llm_plan = None  # keep bot alive even if planner isn't wired
-
 # --- Env
 TOKEN          = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 BASE_URL       = (os.getenv("BASE_URL") or "").strip().rstrip("/")   # e.g. https://...run.app
@@ -22,6 +16,14 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+
+# --- Planner import: use the same simple planner as Slack
+try:
+    from planner.planner import plan as llm_plan
+    logging.info("Planner selected: simple (planner.planner)")
+except Exception as e:
+    logging.exception("Simple planner import failed; using demo fallback: %s", e)
+    llm_plan = None  # demo mode fallback
 
 # ---------- self-heal webhook (runs once at startup)
 async def reconcile_webhook(app: Application):
@@ -100,7 +102,9 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logging.info("PLAN request user=%s goal=%r",
                  (update.effective_user.id if update.effective_user else "unknown"), goal)
     plan_text = await _call_planner(goal)
-    await update.message.reply_text(plan_text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+    await update.message.reply_text(
+        plan_text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True
+    )
 
 async def unknown_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logging.info("UNKNOWN command text=%r", getattr(update.message, "text", ""))
@@ -115,11 +119,25 @@ def add_handlers(a: Application):
 # ---------- run (blocking; PTB manages the event loop)
 def main():
     add_handlers(app)
+
+    # Runtime confirmation: print exactly what planner is wired (every boot)
+    try:
+        src_mod = getattr(llm_plan, "__module__", None) if llm_plan else None
+        try:
+            src_file = inspect.getsourcefile(llm_plan) if llm_plan else None
+        except Exception:
+            src_file = None
+        logging.info(
+            "Planner wired? %s from %s (%s)",
+            bool(llm_plan), src_mod, src_file
+        )
+    except Exception:
+        logging.exception("Planner wiring check failed")
+
     if BASE_URL:
         url_path = f"webhook/{WEBHOOK_SECRET}"
         webhook_url = f"{BASE_URL}/{url_path}"
         logging.info("Starting webhook server at %s", webhook_url)
-        # NOTE: Do NOT await this and do NOT wrap in asyncio.run.
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
