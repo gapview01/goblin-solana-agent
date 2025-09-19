@@ -7,9 +7,17 @@
 #requests==2.31.0
 #streamlit==1.29.0
 
-flask
-gunicorn
-slack-bolt
-python-dotenv
-openai
-requests
+#flask
+#gunicorn
+#slack-bolt
+#python-dotenv
+#openai
+#requests
+
+flask==3.0.3
+gunicorn==22.0.0
+python-dotenv==1.0.1
+requests==2.32.3
+python-telegram-bot==20.7
+openai>=1.0,<2
+slack-bolt==1.18.0   # include only if this service uses Slack
