@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Dict
 from flask import Flask, request, jsonify
 from slack_bolt import App
@@ -26,8 +27,7 @@ def create_app(token: str, signing_secret: str) -> Flask:
     def ping():
         return "pong", 200
 
-
-    # Route for Slack event subscriptions (e.g. verification + messages)
+    # Route for Slack event subscriptions (e.g. verification + messages & slash commands)
     @flask_app.route("/slack/events", methods=["POST"])
     def slack_events():
         data = request.get_json(force=True)
@@ -35,7 +35,36 @@ def create_app(token: str, signing_secret: str) -> Flask:
             return jsonify({"challenge": data["challenge"]})
         return handler.handle(request)
 
-    # Slash command handler (e.g. /goblin)
+    # ---------- NEW: message handler "plan: <goal>" ----------
+    @bolt_app.message(re.compile(r"^\s*plan:(.+)$", re.I))
+    def handle_plan_message(message, say, context, logger):
+        prompt = context["matches"][0].strip()
+        say("_thinking…_")
+        try:
+            text = plan(prompt)
+        except Exception as e:
+            logger.exception("planner failed")
+            text = f"Planner error: {e}"
+        # Slack hard limit ~4k chars
+        say(text[:3800])
+
+    # ---------- NEW: /plan slash command ----------
+    @bolt_app.command("/plan")
+    def slash_plan(ack, respond, command, logger):
+        ack()
+        prompt = (command.get("text") or "").strip()
+        if not prompt:
+            respond("Usage: `/plan your goal here`")
+            return
+        respond("_thinking…_")
+        try:
+            text = plan(prompt)
+        except Exception as e:
+            logger.exception("planner failed")
+            text = f"Planner error: {e}"
+        respond(text[:3800])
+
+    # Existing slash command handler (kept)
     @bolt_app.command("/goblin")
     def handle_goblin(ack, respond, command):
         ack()
@@ -47,6 +76,6 @@ def create_app(token: str, signing_secret: str) -> Flask:
             plan_summary = plan(text)
         except Exception as exc:
             plan_summary = f"Planning failed: {exc}"
-        respond(plan_summary)
+        respond(plan_summary[:3800])
 
     return flask_app

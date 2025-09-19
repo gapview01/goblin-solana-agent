@@ -31,3 +31,8 @@ pip install -r requirements.txt
 ```bash
 python main.py
 ```
+
+## License
+
+Goblin Solana Agent is licensed under the Apache License 2.0. See the
+[LICENSE](LICENSE) file for the full license text.
