@@ -1,6 +1,7 @@
 # telegram_service/server.py
 import os, logging, inspect, math
 import httpx
+from httpx import HTTPStatusError  # for surfacing executor error bodies
 from telegram import Update
 from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
@@ -107,6 +108,7 @@ def _parse_amount(s: str) -> float:
     except Exception:
         raise ValueError("Amount must be a positive number, e.g. 0.5")
 
+# ---------- _exec_post: include executor error body in exceptions
 async def _exec_post(path: str, payload: dict) -> dict:
     if not EXECUTOR_URL:
         raise RuntimeError("EXECUTOR_URL not set")
@@ -117,11 +119,118 @@ async def _exec_post(path: str, payload: dict) -> dict:
     timeout = httpx.Timeout(20.0, read=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(url, headers=headers, json=payload)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            # Surface the executor's response body so you see the reason in Telegram
+            try:
+                body = r.json()
+            except Exception:
+                body = r.text
+            raise httpx.HTTPStatusError(f"{e} | body={body}", request=e.request, response=e.response)
         try:
             return r.json()
         except Exception:
             return {"ok": False, "raw": r.text}
+
+# ----- pretty-print helpers for tokens/amounts -----
+MINTS = {
+    # SOL & USDC (mainnet)
+    "So11111111111111111111111111111111111111112": {"symbol": "SOL",  "decimals": 9},
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {"symbol": "USDC", "decimals": 6},
+}
+def mint_info(mint: str):
+    return MINTS.get(mint, {"symbol": mint[:4] + "…", "decimals": 6})
+
+def to_ui(amount_str: str | int | float, decimals: int) -> float:
+    if amount_str is None:
+        return 0.0
+    if isinstance(amount_str, (int, float)):
+        return float(amount_str) / (10 ** decimals)
+    return int(str(amount_str)) / (10 ** decimals)
+
+def fmt(n: float, dp: int = 6) -> str:
+    s = f"{n:.{dp}f}"
+    return s.rstrip("0").rstrip(".")
+
+def solscan_url(sig: str) -> str:
+    if not sig: return ""
+    if NETWORK.lower() == "mainnet":
+        return f"https://solscan.io/tx/{sig}"
+    return f"https://solscan.io/tx/{sig}?cluster={NETWORK}"
+
+def pull_sig(res: dict):
+    return res.get("signature") or res.get("txid") or res.get("transactionId")
+
+def summarize_swap_like(res: dict, fallback_in_sym: str, fallback_out_sym: str, slip_bps: int):
+    in_mint  = res.get("inputMint")
+    out_mint = res.get("outputMint")
+    in_info  = mint_info(in_mint) if in_mint else {"symbol": fallback_in_sym,  "decimals": 9 if fallback_in_sym=="SOL" else 6}
+    out_info = mint_info(out_mint) if out_mint else {"symbol": fallback_out_sym, "decimals": 9 if fallback_out_sym=="SOL" else 6}
+
+    in_ui  = to_ui(res.get("inAmount"),  in_info["decimals"])
+    out_ui = to_ui(res.get("outAmount"), out_info["decimals"])
+    price  = (out_ui / in_ui) if in_ui else None
+
+    route_labels = []
+    for leg in (res.get("routePlan") or []):
+        label = (leg.get("label") or leg.get("swapInfo", {}).get("label"))
+        if label: route_labels.append(label)
+    route = " → ".join(route_labels) if route_labels else None
+
+    impact = res.get("priceImpactPct")
+    impact_pct = f"{float(impact)*100:.2f}%" if impact is not None else None
+    slip_pct = f"{(res.get('slippageBps') or slip_bps)/100:.2f}%"
+
+    lines = []
+    if in_ui and out_ui:
+        lines.append(f"{fmt(in_ui)} {in_info['symbol']} → {fmt(out_ui)} {out_info['symbol']}")
+    elif in_ui:
+        lines.append(f"{fmt(in_ui)} {in_info['symbol']}")
+    if price is not None:
+        lines.append(f"Price: 1 {in_info['symbol']} ≈ {fmt(price,6)} {out_info['symbol']}")
+    meta = f"Slippage: {slip_pct}"
+    if impact_pct: meta += f" · Impact: {impact_pct}"
+    lines.append(meta)
+    if route: lines.append(f"Route: {route}")
+    return "\n".join(lines)
+
+# ---------- tolerant parsing + token aliases ----------
+def _clean(tokens: list[str]) -> list[str]:
+    """Drop filler words/arrows so 'SOL to USDC 0.2' also works."""
+    drop = {"to", "TO", "->", "→", "=>"}
+    return [t for t in tokens if t not in drop]
+
+# Slack-style aliases -> canonical tickers used by routes/LSTs
+_ALIASES = {
+    # Base assets
+    "SOL": "SOL", "USDC": "USDC",
+    # Jito LST
+    "JITO": "JITOSOL", "JITOSOL": "JITOSOL", "JITO-SOL": "JITOSOL", "JITO_SOL": "JITOSOL", "JITOSOLTOKEN": "JITOSOL",
+    # Marinade LST (note: MNDE is governance; LST is MSOL)
+    "MARINADE": "MSOL", "MSOL": "MSOL", "MARINADE-SOL": "MSOL", "MARINADE_SOL": "MSOL",
+    # BlazeStake
+    "BLAZE": "BSOL", "BSOL": "BSOL", "BLAZE-SOL": "BSOL", "BLAZE_SOL": "BSOL",
+    # Socean
+    "SOCEAN": "SCNSOL", "SCNSOL": "SCNSOL", "SOCEAN-SOL": "SCNSOL", "SOCEAN_SOL": "SCNSOL",
+}
+def _norm(sym: str) -> str:
+    key = sym.replace(" ", "").replace("-", "").replace("_", "").upper()
+    return _ALIASES.get(key, sym.upper())
+
+# ---------- protocol & unit helpers for native stake endpoints ----------
+def to_lamports(sol_amount: float) -> int:
+    """Convert SOL (UI) to lamports."""
+    return int(round(sol_amount * 1_000_000_000))
+
+_PROTOCOLS = {
+    "JITOSOL": "jito", "JITO": "jito",
+    "MSOL": "marinade", "MARINADE": "marinade",
+    "BSOL": "blaze", "BLAZE": "blaze",
+    "SCNSOL": "socean", "SOCEAN": "socean",
+}
+def _proto(token: str) -> str:
+    return _PROTOCOLS.get(token.upper(), token.lower())
 
 # ---------- handlers (basic)
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -163,53 +272,79 @@ async def unknown_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ---------- executor command handlers
 async def balance_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
-        await update.message.reply_text("🚫 Not allowed."); return
-    token = (_args(ctx)[0] if _args(ctx) else "SOL").upper()
+        return await update.message.reply_text("🚫 Not allowed.")
+    toks = _args(ctx)
+    token = _norm(toks[0]) if toks else "SOL"
     payload = {"wallet": WALLET_ADDRESS, "token": token, "network": NETWORK}
     try:
         res = await _exec_post("balance", payload)
-        amt = res.get("balance") or res.get("result") or res
-        await update.message.reply_text(f"💰 Balance {token}: {amt}")
+        # friendly formats
+        if "sol" in res:
+            ui = float(res["sol"]); extra = f" ({int(res.get('lamports', ui*1e9)):,} lamports)"
+        elif "uiAmount" in res:
+            ui = float(res["uiAmount"]); extra = ""
+        elif "amount" in res and "decimals" in res:
+            ui = int(res["amount"]) / (10**int(res["decimals"])); extra = ""
+        else:
+            ui = res.get("balance") or res.get("result") or res; extra = ""
+        await update.message.reply_text(f"💰 Balance {token}: {fmt(float(ui))}{extra}")
     except Exception as e:
         await update.message.reply_text(f"⚠️ Balance failed: {e}")
 
 async def quote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
-        await update.message.reply_text("🚫 Not allowed."); return
-    argv = _args(ctx)
+        return await update.message.reply_text("🚫 Not allowed.")
+    argv = _clean(_args(ctx))
     if len(argv) < 3:
-        await update.message.reply_text("Usage: /quote <FROM> <TO> <AMOUNT> [slippage_bps]\nExample: /quote SOL USDC 0.5 100")
-        return
-    from_sym, to_sym = argv[0].upper(), argv[1].upper()
+        return await update.message.reply_text("Usage: /quote <FROM> <TO> <AMOUNT> [slippage_bps]\nExample: /quote SOL USDC 0.5 100")
+    from_sym, to_sym = _norm(argv[0]), _norm(argv[1])
     try:
         amount = _parse_amount(argv[2])
     except Exception as e:
-        await update.message.reply_text(str(e)); return
+        return await update.message.reply_text(str(e))
     slip_bps = int(argv[3]) if len(argv) >= 4 else DEFAULT_SLIP_BPS
     payload = {"from": from_sym, "to": to_sym, "amount": str(amount), "slippage_bps": slip_bps, "network": NETWORK}
     try:
         res = await _exec_post("quote", payload)
-        out = res.get("out") or res.get("amount_out") or res
-        px  = res.get("price")
-        txt = f"🧮 Quote {amount} {from_sym} → {to_sym}\n"
-        if px:  txt += f"Price: {px}\n"
-        if out: txt += f"Estimated out: {out} {to_sym}"
-        await update.message.reply_text(txt.strip())
+        # Pretty summary
+        in_mint, out_mint = res.get("inputMint"), res.get("outputMint")
+        in_info  = mint_info(in_mint) if in_mint else {"symbol": from_sym, "decimals": 9 if from_sym=="SOL" else 6}
+        out_info = mint_info(out_mint) if out_mint else {"symbol": to_sym,  "decimals": 9 if to_sym=="SOL"  else 6}
+        in_ui  = to_ui(res.get("inAmount"),  in_info["decimals"]) or amount
+        out_ui = to_ui(res.get("outAmount"), out_info["decimals"])
+        price  = (out_ui / in_ui) if in_ui else None
+        impact = res.get("priceImpactPct"); impact_pct = f"{float(impact)*100:.2f}%" if impact is not None else None
+        slip_pct = f"{(res.get('slippageBps') or slip_bps)/100:.2f}%"
+
+        lines = [f"🧮 Quote {fmt(in_ui)} {in_info['symbol']} → {out_info['symbol']}"]
+        if out_ui: lines.append(f"Est. out: {fmt(out_ui)} {out_info['symbol']}")
+        if price is not None: lines.append(f"Price: 1 {in_info['symbol']} ≈ {fmt(price,6)} {out_info['symbol']}")
+        meta = f"Slippage: {slip_pct}"
+        if impact_pct: meta += f" · Impact: {impact_pct}"
+        lines.append(meta)
+
+        # Route (optional)
+        route_labels = []
+        for leg in (res.get("routePlan") or []):
+            label = (leg.get("label") or leg.get("swapInfo", {}).get("label"))
+            if label: route_labels.append(label)
+        if route_labels: lines.append("Route: " + " → ".join(route_labels))
+
+        await update.message.reply_text("\n".join(lines))
     except Exception as e:
         await update.message.reply_text(f"⚠️ Quote failed: {e}")
 
 async def swap_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
-        await update.message.reply_text("🚫 Not allowed."); return
-    argv = _args(ctx)
+        return await update.message.reply_text("🚫 Not allowed.")
+    argv = _clean(_args(ctx))
     if len(argv) < 3:
-        await update.message.reply_text("Usage: /swap <FROM> <TO> <AMOUNT> [slippage_bps]\nExample: /swap SOL USDC 0.5 100")
-        return
-    from_sym, to_sym = argv[0].upper(), argv[1].upper()
+        return await update.message.reply_text("Usage:\n/swap <FROM> <TO> <AMOUNT> [slippage_bps]\nExample: /swap SOL USDC 0.5 100")
+    from_sym, to_sym = _norm(argv[0]), _norm(argv[1])
     try:
         amount = _parse_amount(argv[2])
     except Exception as e:
-        await update.message.reply_text(str(e)); return
+        return await update.message.reply_text(str(e))
     slip_bps = int(argv[3]) if len(argv) >= 4 else DEFAULT_SLIP_BPS
     payload = {
         "from": from_sym, "to": to_sym, "amount": str(amount),
@@ -217,50 +352,100 @@ async def swap_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     }
     try:
         res = await _exec_post("swap", payload)
-        sig = res.get("signature") or res.get("txid") or res
-        await update.message.reply_text(f"🔁 Swap sent ✅\nTx: `{sig}`", parse_mode=ParseMode.MARKDOWN)
+        sig = pull_sig(res)
+        summary = summarize_swap_like(res, from_sym, to_sym, slip_bps)
+        msg = f"🔁 Swap sent ✅\n{summary}"
+        if sig: msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
     except Exception as e:
         await update.message.reply_text(f"⚠️ Swap failed: {e}")
 
 async def stake_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
-        await update.message.reply_text("🚫 Not allowed."); return
+        return await update.message.reply_text("🚫 Not allowed.")
     argv = _args(ctx)
     if len(argv) < 2:
-        await update.message.reply_text("Usage: /stake <TOKEN> <AMOUNT>\nExample: /stake JITOSOL 1.0")
-        return
-    token = argv[0].upper()
+        return await update.message.reply_text("Usage:\n/stake <TOKEN> <AMOUNT>\nExample: /stake JITOSOL 1.0")
+    token = _norm(argv[0])
     try:
         amount = _parse_amount(argv[1])
     except Exception as e:
-        await update.message.reply_text(str(e)); return
-    payload = {"token": token, "amount": str(amount), "wallet": WALLET_ADDRESS, "network": NETWORK}
+        return await update.message.reply_text(str(e))
+
+    # Native executor stake: needs protocol + amountLamports
+    payload = {
+        "protocol": _proto(token),                 # "jito" / "marinade" / "blaze" / "socean"
+        "amountLamports": to_lamports(amount),     # integer lamports
+        "wallet": WALLET_ADDRESS,
+        "network": NETWORK,
+    }
     try:
         res = await _exec_post("stake", payload)
-        sig = res.get("signature") or res.get("txid") or res
-        await update.message.reply_text(f"🪙 Stake sent ✅\nTx: `{sig}`", parse_mode=ParseMode.MARKDOWN)
+        sig = pull_sig(res)
+        msg = f"🪙 Staked {fmt(amount)} {token} ✅"
+        if sig: msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
+        return await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
+    except HTTPStatusError as e:
+        logging.exception("Stake HTTP error (native). Falling back to swap: %s", e)
+        # Fallback: SOL -> LST swap
+        try:
+            res = await _exec_post("swap", {
+                "from": "SOL", "to": token, "amount": str(amount),
+                "slippage_bps": DEFAULT_SLIP_BPS, "wallet": WALLET_ADDRESS, "network": NETWORK
+            })
+            sig = pull_sig(res)
+            summary = summarize_swap_like(res, "SOL", token, DEFAULT_SLIP_BPS)
+            msg = f"🪙 Staked (via swap) ✅\n{summary}"
+            if sig: msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
+            return await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
+        except Exception as ee:
+            return await update.message.reply_text(f"⚠️ Stake failed: {ee}")
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Stake failed: {e}")
+        logging.exception("Stake unexpected error: %s", e)
+        return await update.message.reply_text(f"⚠️ Stake failed: {e}")
 
 async def unstake_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
-        await update.message.reply_text("🚫 Not allowed."); return
+        return await update.message.reply_text("🚫 Not allowed.")
     argv = _args(ctx)
     if len(argv) < 2:
-        await update.message.reply_text("Usage: /unstake <TOKEN> <AMOUNT>\nExample: /unstake JITOSOL 0.5")
-        return
-    token = argv[0].upper()
+        return await update.message.reply_text("Usage:\n/unstake <TOKEN> <AMOUNT>\nExample: /unstake JITOSOL 0.5")
+    token = _norm(argv[0])
     try:
         amount = _parse_amount(argv[1])
     except Exception as e:
-        await update.message.reply_text(str(e)); return
-    payload = {"token": token, "amount": str(amount), "wallet": WALLET_ADDRESS, "network": NETWORK}
+        return await update.message.reply_text(str(e))
+
+    payload = {
+        "protocol": _proto(token),
+        "amountLamports": to_lamports(amount),
+        "wallet": WALLET_ADDRESS,
+        "network": NETWORK,
+    }
     try:
         res = await _exec_post("unstake", payload)
-        sig = res.get("signature") or res.get("txid") or res
-        await update.message.reply_text(f"🪙 Unstake sent ✅\nTx: `{sig}`", parse_mode=ParseMode.MARKDOWN)
+        sig = pull_sig(res)
+        msg = f"🪙 Unstaked {fmt(amount)} {token} ✅"
+        if sig: msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
+        return await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
+    except HTTPStatusError as e:
+        logging.exception("Unstake HTTP error (native). Falling back to swap: %s", e)
+        # Fallback: LST -> SOL swap
+        try:
+            res = await _exec_post("swap", {
+                "from": token, "to": "SOL", "amount": str(amount),
+                "slippage_bps": DEFAULT_SLIP_BPS, "wallet": WALLET_ADDRESS, "network": NETWORK
+            })
+            sig = pull_sig(res)
+            summary = summarize_swap_like(res, token, "SOL", DEFAULT_SLIP_BPS)
+            msg = f"🪙 Unstaked (via swap) ✅\n{summary}"
+            if sig: msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
+            return await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
+        except Exception as ee:
+            return await update.message.reply_text(f"⚠️ Unstake failed: {ee}")
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Unstake failed: {e}")
+        logging.exception("Unstake unexpected error: %s", e)
+        return await update.message.reply_text(f"⚠️ Unstake failed: {e}")
 
 def add_handlers(a: Application):
     a.add_handler(CommandHandler("start", start))
@@ -279,10 +464,7 @@ def add_handlers(a: Application):
 # ---------- run (blocking; PTB manages the event loop)
 def main():
     add_handlers(app)
-    logging.info(
-        "Planner wired? %s from %s",
-        llm_plan is not None, getattr(llm_plan, "__module__", None)
-    )
+    logging.info("Planner wired? %s from %s", llm_plan is not None, getattr(llm_plan, "__module__", None))
     if BASE_URL:
         url_path = f"webhook/{WEBHOOK_SECRET}"
         webhook_url = f"{BASE_URL}/{url_path}"
