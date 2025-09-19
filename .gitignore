@@ -30,3 +30,4 @@ agent-keypair.json
 agent-keypair-*.json
 *.pem
 *.key
+.env
