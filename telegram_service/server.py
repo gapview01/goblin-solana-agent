@@ -1,5 +1,5 @@
 # telegram_service/server.py
-import os, logging, inspect, math, html, json, time, re, asyncio
+import os, logging, inspect, math, html, json, time, re, asyncio, uuid, base64, io
 import httpx
 from httpx import HTTPStatusError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -8,6 +8,15 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
 )
+from typing import Any, Dict, Optional
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt  # type: ignore
+except Exception:  # pragma: no cover - matplotlib optional at runtime
+    matplotlib = None  # type: ignore
+    plt = None  # type: ignore
 
 # --- import path guard (ensure `planner/` is importable regardless of CWD)
 import sys, pathlib
@@ -15,20 +24,22 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]  # repo root (one level above
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from planner.exec_ready_planner import build_exec_ready_plan
+
 # ---------- basic config (env)
-TOKEN          = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-BASE_URL       = (os.getenv("BASE_URL") or "").strip().rstrip("/")
-WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "hook").strip()
-PORT           = int(os.getenv("PORT") or 8080)
-LOG_LEVEL      = (os.getenv("LOG_LEVEL") or "INFO").upper()
-SHOW_PLAN_JSON = (os.getenv("SHOW_PLAN_JSON") or "0").lower() in ("1", "true", "yes")
+TOKEN             = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+WEBHOOK_BASE_URL  = (os.getenv("WEBHOOK_BASE_URL") or os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+WEBHOOK_SECRET    = (os.getenv("WEBHOOK_SECRET") or "hook").strip()
+PORT              = int(os.getenv("PORT") or 8080)
+LOG_LEVEL         = (os.getenv("LOG_LEVEL") or "INFO").upper()
+SHOW_PLAN_JSON    = (os.getenv("SHOW_PLAN_JSON") or "0").lower() in ("1", "true", "yes")
 
 # Planner selection: "llm" (default) prefers planner/llm_planner.py; set to "legacy" for planner/planner.py
 PLANNER_IMPL   = (os.getenv("PLANNER_IMPL") or "llm").lower()
 REQUIRE_LLM    = (os.getenv("REQUIRE_LLM_PLANNER") or "0").lower() in ("1", "true", "yes")
 
 # Executor (backend) config
-EXECUTOR_URL      = (os.getenv("EXECUTOR_URL") or "").rstrip("/")
+EXECUTOR_BASE_URL = (os.getenv("BASE_URL") or os.getenv("EXECUTOR_URL") or "").rstrip("/")
 EXECUTOR_TOKEN    = (os.getenv("EXECUTOR_TOKEN") or "").strip()
 WALLET_ADDRESS    = (os.getenv("WALLET_ADDRESS") or "").strip()
 NETWORK           = (os.getenv("NETWORK") or "mainnet").strip()
@@ -45,6 +56,27 @@ logging.basicConfig(
 
 # --- tiny in-memory plan cache per chat (for option CTAs) ---
 _LAST_PLAN: dict[int, dict] = {}   # chat_id -> plan dict
+
+# --- simulation token cache (token -> plan, TTL 600s) ---
+_SIM_CACHE_TTL = 600.0
+_SIM_CACHE: Dict[str, Dict[str, Any]] = {}
+
+def _sim_cache_put(token: str, plan: Dict[str, Any]) -> None:
+    now = time.time()
+    _SIM_CACHE[token] = {"plan": plan, "ts": now}
+    stale = [key for key, meta in list(_SIM_CACHE.items()) if now - float(meta.get("ts", 0.0)) > _SIM_CACHE_TTL]
+    for key in stale:
+        _SIM_CACHE.pop(key, None)
+
+def _sim_cache_get(token: str) -> Optional[Dict[str, Any]]:
+    entry = _SIM_CACHE.get(token)
+    if not entry:
+        return None
+    if time.time() - float(entry.get("ts", 0.0)) > _SIM_CACHE_TTL:
+        _SIM_CACHE.pop(token, None)
+        return None
+    plan = entry.get("plan")
+    return plan if isinstance(plan, dict) else None
 
 # --- Planner import (prefer llm_planner, fallback to legacy, then demo)
 llm_plan = None
@@ -73,10 +105,10 @@ except Exception as e:
 # ---------- self-heal webhook (runs once at startup)
 async def reconcile_webhook(app: Application):
     try:
-        if not BASE_URL:
-            logging.info("Webhook reconcile: BASE_URL unset; skipping")
+        if not WEBHOOK_BASE_URL:
+            logging.info("Webhook reconcile: WEBHOOK_BASE_URL unset; skipping")
             return
-        expected = f"{BASE_URL}/webhook/{WEBHOOK_SECRET}"
+        expected = f"{WEBHOOK_BASE_URL}/webhook/{WEBHOOK_SECRET}"
         info = await app.bot.get_webhook_info()
         current = info.url or ""
         if current != expected:
@@ -109,26 +141,54 @@ def _fmt_list_or_str(x) -> str:
         return x
     return ""
 
-async def _call_planner(goal: str) -> str:
-    """
-    Calls the planner with:
-      - wallet_state (sol_balance) so it can size amounts
-      - policy override to ALLOW ALL TOKENS ('*') for planning (memecoins included)
-      - optional min_token_mcap_usd hint
-    """
-    if not llm_plan:
-        return f"(demo) Plan for: {goal}"
-    try:
-        # get SOL balance for balance-aware sizing
-        sol = 0.0
+async def _call_planner(goal: str) -> tuple[str, Dict[str, Any]]:
+    """Call the planner and echo the raw JSON string alongside wallet state."""
+
+    sol = 0.0
+    lamports = 0
+    if WALLET_ADDRESS:
         try:
             bal = await _exec_post("balance", {"wallet": WALLET_ADDRESS, "token": "SOL", "network": NETWORK})
-            sol = float(bal.get("sol") or bal.get("uiAmount") or 0.0)
+            if isinstance(bal, dict):
+                if "sol" in bal:
+                    sol = float(bal.get("sol") or 0.0)
+                elif "uiAmount" in bal:
+                    sol = float(bal.get("uiAmount") or 0.0)
+                elif "lamports" in bal:
+                    lamports = int(bal.get("lamports") or 0)
+                    sol = lamports / 1_000_000_000
+                lamports = int(bal.get("lamports") or lamports or int(sol * 1_000_000_000))
+            else:
+                sol = float(bal or 0.0)
         except Exception:
-            pass
+            logging.debug("Wallet balance lookup failed", exc_info=True)
+    if not lamports:
+        lamports = int(sol * 1_000_000_000)
+    wallet_state: Dict[str, Any] = {"sol_balance": float(sol), "lamports": int(lamports)}
 
+    def _fallback_plan() -> dict:
+        return {
+            "summary": f"Demo plan for {goal}",
+            "understanding": {"goal_rewrite": goal},
+            "options": [
+                {"name": "Conservative", "strategy": "Hold SOL and monitor market", "plan": []},
+                {"name": "Standard", "strategy": "Blend SOL with liquid staking for yield", "plan": []},
+                {"name": "Aggressive", "strategy": "Deploy into higher beta swaps when liquidity allows", "plan": []},
+            ],
+            "actions": [],
+            "risks": ["Market volatility", "Execution risk"],
+            "simulation": {"horizon_days": 30},
+            "baseline": {"name": "Hold SOL"},
+            "sizing": {"desired_sol": 0.1},
+            "frame": "CSA",
+        }
+
+    if not llm_plan:
+        return json.dumps(_fallback_plan()), wallet_state
+
+    try:
         sig = inspect.signature(llm_plan)
-        kwargs = {}
+        kwargs: Dict[str, Any] = {}
 
         if "wallet_state" in sig.parameters:
             kwargs["wallet_state"] = {"sol_balance": sol}
@@ -148,10 +208,12 @@ async def _call_planner(goal: str) -> str:
 
         if inspect.isawaitable(res):
             res = await res
-        return str(res)
+        if isinstance(res, (dict, list)):
+            return json.dumps(res), wallet_state
+        return str(res), wallet_state
     except Exception:
         logging.exception("planner.plan crashed")
-        return "⚠️ Planner error. Check Cloud Run logs."
+        return json.dumps(_fallback_plan()), wallet_state
 
 def _is_allowed(update: Update) -> bool:
     if not ALLOWED_USER_IDS:
@@ -277,9 +339,9 @@ async def _quote_payload_indexjs(from_sym: str, to_sym: str, amount_ui: str | fl
 
 # ---------- _exec_post: debug + fail-fast + single quick retry
 async def _exec_post(path: str, payload: dict) -> dict:
-    if not EXECUTOR_URL:
-        raise RuntimeError("EXECUTOR_URL not set")
-    url = f"{EXECUTOR_URL}/{path.lstrip('/')}"
+    if not EXECUTOR_BASE_URL:
+        raise RuntimeError("EXECUTOR_BASE_URL not set")
+    url = f"{EXECUTOR_BASE_URL}/{path.lstrip('/')}"
     headers = {"Content-Type": "application/json"}
     if EXECUTOR_TOKEN:
         headers["Authorization"] = f"Bearer {EXECUTOR_TOKEN}"
@@ -439,7 +501,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("pong")
 
-# ---- /plan: RICH BRIEFING + option CTAs + inline actions
+# ---- /plan: build exec-ready plan and surface simulate CTA
 async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text or ""
     goal = raw.partition(" ")[2].strip() or " ".join(ctx.args).strip()
@@ -453,103 +515,214 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logging.info("PLAN request user=%s goal=%r",
                  (update.effective_user.id if update.effective_user else "unknown"), goal)
 
-    plan_text = await _call_planner(goal)
+    plan_text, wallet_state = await _call_planner(goal)
 
-    # Parse planner JSON (rich)
     try:
-        plan = json.loads(plan_text)
+        parsed = json.loads(plan_text)
+        plan_dict = parsed if isinstance(parsed, dict) else {}
     except Exception:
-        code = f"<pre>{html.escape(plan_text)}</pre>"
-        await update.message.reply_text(code, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        return
+        logging.warning("Planner response not JSON; proceeding with empty plan snapshot")
+        plan_dict = {}
 
-    # Cache plan per chat for option callbacks
+    exec_plan = build_exec_ready_plan(goal=goal, raw_plan=plan_dict, wallet_state=wallet_state)
+    token = uuid.uuid4().hex
+    exec_plan["token"] = token
+
     chat_id = update.effective_chat.id if update.effective_chat else None
     if isinstance(chat_id, int):
-        _LAST_PLAN[chat_id] = plan
+        _LAST_PLAN[chat_id] = exec_plan
 
     # Warm Jupiter list in background (faster first quote)
     asyncio.create_task(_jup_tokenlist())
 
-    # ---- Rich briefing fields
-    summary = plan.get("summary") or ""
-    understanding = plan.get("understanding") or {}
-    policy = plan.get("policy") or {}
-    options = plan.get("options") or []
-    token_candidates = plan.get("token_candidates") or []
-    risks = plan.get("risks") or []
-    simulation = plan.get("simulation") or {}
-    default_option = (plan.get("default_option") or "").strip()
-    actions = plan.get("actions") or []
-
-    # Build briefing text
-    brief = []
-    goal_rewrite = understanding.get("goal_rewrite") or goal
-    brief.append(f"<b>Goal:</b> {html.escape(goal_rewrite)}")
-    if summary:
-        brief.append(f"<b>Summary:</b> {html.escape(summary)}")
-
-    if token_candidates:
-        brief.append("<b>Candidates:</b>")
-        for t in token_candidates[:3]:
-            sym = html.escape(str(t.get("symbol") or ""))
-            why = html.escape(str(t.get("rationale") or ""))
-            rsk = _fmt_list_or_str(t.get("risks"))
-            line = f"• <code>{sym}</code> — {why}"
-            if rsk:
-                line += f" (risks: {html.escape(rsk)})"
-            brief.append(line)
-
-    if options:
-        brief.append("<b>Options:</b>")
-        for idx, opt in enumerate(options):
-            name = html.escape(str(opt.get("name") or f"Option {idx+1}"))
-            strat = html.escape(str(opt.get("strategy") or ""))
-            rationale = html.escape(str(opt.get("rationale") or ""))
-            tradeoffs = opt.get("tradeoffs")
-            if isinstance(tradeoffs, dict):
-                pros = _fmt_list_or_str(tradeoffs.get("pros"))
-                cons = _fmt_list_or_str(tradeoffs.get("cons"))
-            else:
-                pros = _fmt_list_or_str(tradeoffs)
-                cons = ""
-            mark = " (default)" if default_option and name.lower() == default_option.lower() else ""
-            brief.append(f"• <b>{name}</b>{mark}: {strat}")
-            if rationale:
-                brief.append(f"  · Why: {rationale}")
-            if pros:
-                brief.append(f"  · Pros: {html.escape(pros)}")
-            if cons:
-                brief.append(f"  · Cons: {html.escape(cons)}")
-
-    if risks:
-        brief.append("<b>Key risks:</b> " + html.escape(_fmt_list_or_str(risks)))
-
-    if simulation:
-        crit = simulation.get("success_criteria") or {}
-        gates = []
-        if isinstance(crit, dict) and "max_price_impact_bps" in crit:
-            gates.append(f"impact ≤ {crit['max_price_impact_bps']} bps")
-        if "min_token_mcap_usd" in policy:
-            gates.append(f"mcap ≥ ${int(policy['min_token_mcap_usd']):,}")
-        if gates:
-            brief.append("<b>Simulate before executing:</b> " + " · ".join(gates))
-
-    await update.message.reply_text("\n".join(brief), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-
-    # ---- Option CTAs (dynamic names)
-    if options:
-        opt_rows = _options_cta(options)
-        await update.message.reply_text("Choose a path:", reply_markup=InlineKeyboardMarkup(opt_rows))
-
-    # ---- Primitive action buttons (root 'actions' for quick simulate/exec)
-    action_rows = _actions_to_buttons(actions)
-    if action_rows:
-        await update.message.reply_text("Tap to simulate or execute:", reply_markup=InlineKeyboardMarkup(action_rows))
+    await send_playback_with_simulate(update, ctx, exec_plan)
 
     if SHOW_PLAN_JSON:
         code = f"<pre>{html.escape(plan_text)}</pre>"
         await update.message.reply_text(code, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+async def send_playback_with_simulate(update: Update, ctx: ContextTypes.DEFAULT_TYPE, plan: Dict[str, Any]) -> None:
+    """Send the playback summary with a single simulate CTA and cache the plan."""
+
+    token = plan.get("token") or uuid.uuid4().hex
+    plan["token"] = token
+    _sim_cache_put(token, plan)
+
+    playback_text = plan.get("playback_text") or plan.get("summary") or "Plan ready. Simulate before executing"
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🧪 Simulate Scenarios", callback_data=f"SIM:{token}")]]
+    )
+
+    if update.message:
+        await update.message.reply_text(
+            playback_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+    else:
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if chat_id is not None:
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text=playback_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+
+async def _remove_inline_keyboard(callback_query) -> None:
+    try:
+        await callback_query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+def _render_series_chart(series: list[Dict[str, Any]], title: Optional[str]) -> Optional[io.BytesIO]:
+    if plt is None:
+        return None
+    fig, ax = plt.subplots(figsize=(6, 4))  # type: ignore[call-arg]
+    plotted = False
+    for item in series:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "Scenario")
+        t = item.get("t") or []
+        v = item.get("v") or []
+        if not isinstance(t, (list, tuple)) or not isinstance(v, (list, tuple)):
+            continue
+        if len(t) != len(v):
+            continue
+        try:
+            xs = [float(x) for x in t]
+            ys = [float(y) for y in v]
+        except Exception:
+            continue
+        ax.plot(xs, ys, label=name)  # type: ignore[arg-type]
+        plotted = True
+    if not plotted:
+        plt.close(fig)
+        return None
+    ax.set_title(title or "Simulation")  # type: ignore[attr-defined]
+    ax.set_xlabel("Days")  # type: ignore[attr-defined]
+    ax.set_ylabel("Value (normalized)")  # type: ignore[attr-defined]
+    ax.legend(loc="best")  # type: ignore[attr-defined]
+    fig.tight_layout()  # type: ignore[attr-defined]
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")  # type: ignore[attr-defined]
+    plt.close(fig)
+    buf.seek(0)
+    buf.name = "simulation.png"
+    return buf
+
+def _series_summary_lines(series: list[Dict[str, Any]], title: Optional[str], caption: Optional[str]) -> list[str]:
+    lines: list[str] = []
+    if title:
+        lines.append(str(title))
+    for item in series:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "Scenario")
+        values = item.get("v") or []
+        if isinstance(values, (list, tuple)) and values:
+            try:
+                start = float(values[0])
+                end = float(values[-1])
+                lines.append(f"{name}: {start:.4f} → {end:.4f}")
+            except Exception:
+                lines.append(f"{name}: data unavailable")
+    if caption:
+        lines.append(str(caption))
+    if not lines:
+        lines.append("Simulation completed.")
+    return lines
+
+async def on_simulate_scenarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return
+    try:
+        await q.answer("Simulating…")
+    except Exception:
+        pass
+
+    token = ""
+    data = q.data or ""
+    if isinstance(data, str) and data.startswith("SIM:"):
+        token = data.split(":", 1)[1]
+    if not token:
+        await _remove_inline_keyboard(q)
+        await q.message.reply_text("Session expired. Ask for a new plan.")
+        return
+
+    plan = _sim_cache_get(token)
+    if not plan:
+        await _remove_inline_keyboard(q)
+        await q.message.reply_text("Session expired. Ask for a new plan.")
+        return
+
+    options = plan.get("options") or []
+    payload: Dict[str, Any] = {
+        "frame": plan.get("frame") or "CSA",
+        "options": list(options)[:3],
+        "sizing": plan.get("sizing") or {},
+        "baseline": plan.get("baseline") or {"name": "Hold SOL"},
+        "horizon_days": plan.get("horizon_days") or 30,
+    }
+    account = plan.get("account") or plan.get("payer")
+    if account:
+        payload["account"] = account
+
+    try:
+        resp = await _exec_post("simulate", payload)
+    except HTTPStatusError as err:
+        body_text = ""
+        try:
+            if err.response is not None:
+                body_text = err.response.text
+        except Exception:
+            body_text = ""
+        snippet = (body_text or str(err))[:200]
+        await _remove_inline_keyboard(q)
+        await q.message.reply_text(f"⚠️ Simulation failed: {snippet}")
+        return
+    except Exception as err:
+        await _remove_inline_keyboard(q)
+        await q.message.reply_text(f"⚠️ Simulation failed: {err}")
+        return
+
+    await _remove_inline_keyboard(q)
+
+    if not isinstance(resp, dict):
+        await q.message.reply_text("⚠️ Unexpected simulation response.")
+        return
+
+    chart_b64 = resp.get("chart_png_base64")
+    caption = resp.get("caption") if isinstance(resp.get("caption"), str) else None
+    title = resp.get("title") if isinstance(resp.get("title"), str) else None
+
+    if isinstance(chart_b64, str) and chart_b64.strip():
+        try:
+            image_bytes = base64.b64decode(chart_b64)
+            bio = io.BytesIO(image_bytes)
+            bio.name = "simulation.png"
+            await q.message.reply_photo(photo=bio, caption=caption or title)
+            return
+        except Exception as err:
+            await q.message.reply_text(f"⚠️ Simulation returned invalid chart: {err}")
+            return
+
+    raw_series = resp.get("series")
+    series = [s for s in raw_series if isinstance(s, dict)] if isinstance(raw_series, list) else []
+    if series:
+        chart_buf = _render_series_chart(series, title)
+        if chart_buf:
+            await q.message.reply_photo(photo=chart_buf, caption=caption or title)
+            return
+        lines = _series_summary_lines(series, title, caption)
+        await q.message.reply_text("\n".join(lines))
+        return
+
+    await q.message.reply_text("⚠️ Unexpected simulation response.")
 
 # ---- Option CTA handler: show that option’s mini-brief and its actions
 async def on_option_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -843,6 +1016,7 @@ def add_handlers(a: Application):
     a.add_handler(CommandHandler("start", start))
     a.add_handler(CommandHandler("ping", ping))
     a.add_handler(CommandHandler("plan", plan_cmd))
+    a.add_handler(CallbackQueryHandler(on_simulate_scenarios, pattern=r"^SIM:"))
     a.add_handler(CallbackQueryHandler(on_option_button, pattern=r"^opt:"))  # option CTAs
     a.add_handler(CallbackQueryHandler(on_action_button, pattern=r"^run:"))  # primitive CTAs
     a.add_handler(CommandHandler("balance", balance_cmd))
@@ -856,9 +1030,9 @@ def add_handlers(a: Application):
 def main():
     add_handlers(app)
     logging.info("Planner wired? %s from %s", llm_plan is not None, getattr(llm_plan, "__module__", None))
-    if BASE_URL:
+    if WEBHOOK_BASE_URL:
         url_path = f"webhook/{WEBHOOK_SECRET}"
-        webhook_url = f"{BASE_URL}/{url_path}"
+        webhook_url = f"{WEBHOOK_BASE_URL}/{url_path}"
         logging.info("Starting webhook server at %s", webhook_url)
         app.run_webhook(
             listen="0.0.0.0",
@@ -869,7 +1043,7 @@ def main():
             drop_pending_updates=True,
         )
     else:
-        logging.info("BASE_URL not set -> polling mode (not suitable for Cloud Run)")
+        logging.info("WEBHOOK_BASE_URL not set -> polling mode (not suitable for Cloud Run)")
         app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
