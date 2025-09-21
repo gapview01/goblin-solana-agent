@@ -88,6 +88,7 @@ const DECIMALS = { SOL: 9, USDC: 6 };
 
 let TOKENS_CACHE = null;
 let TOKENS_CACHE_TS = 0;
+
 async function resolveMintBySymbol(symbol) {
   const sym = String(symbol).toUpperCase();
   const now = Date.now();
@@ -144,6 +145,11 @@ async function jupSwapFromQuote(quote) {
   return sig;
 }
 
+// Helper: only treat strings that look like base58 mints as mints
+const looksLikeMint = (s) =>
+  typeof s === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s);
+
+// Quote resolves symbols to mints unless a real mint was provided
 app.post("/quote", async (req, res) => {
   try {
     let { from, to, amount, slippageBps } = req.body || {};
@@ -151,12 +157,16 @@ app.post("/quote", async (req, res) => {
       return res.status(400).json({ error: "from, to, amount required" });
     }
     from = String(from).toUpperCase();
-    to = String(to).toUpperCase();
+    to   = String(to).toUpperCase();
 
-    let inputMint = MINTS[from] || req.body.from;
-    let outputMint = MINTS[to] || req.body.to;
-    if (!inputMint) inputMint = await resolveMintBySymbol(from);
+    // Use executor MINTS first; otherwise only accept req.body.from/to as mints if they look like mints
+    let inputMint  = MINTS[from] || (looksLikeMint(req.body.from) ? req.body.from : null);
+    let outputMint = MINTS[to]   || (looksLikeMint(req.body.to)   ? req.body.to   : null);
+
+    // Resolve symbols that weren't mapped in MINTS (e.g., JITOSOL) via Jupiter token list
+    if (!inputMint)  inputMint  = await resolveMintBySymbol(from);
     if (!outputMint) outputMint = await resolveMintBySymbol(to);
+
     if (!inputMint || !outputMint) {
       return res.status(400).json({ error: "could not resolve mint(s)", from, to });
     }
