@@ -220,6 +220,40 @@ app.post("/swap", async (req, res) => {
   }
 });
 
+// ---------------- Simulate Scenarios ----------------
+app.post("/simulate", (req, res) => {
+  try {
+    const options = Array.isArray(req.body?.options) ? req.body.options : [];
+    const baseline = req.body?.baseline ?? { name: "Hold SOL" };
+    const horizonDays = Number(req.body?.horizon_days ?? 30);
+    const horizon = Number.isFinite(horizonDays) && horizonDays > 0 ? Math.floor(horizonDays) : 30;
+    const timeline = Array.from({ length: horizon + 1 }, (_v, idx) => idx);
+
+    const baseSeries = {
+      name: typeof baseline?.name === "string" ? baseline.name : "Baseline",
+      t: timeline,
+      v: timeline.map(() => 1.0),
+    };
+
+    const growthCurve = [0.01, 0.03, 0.06];
+    const scenarioSeries = options.slice(0, 3).map((opt, idx) => {
+      const name = typeof opt?.name === "string" && opt.name ? opt.name : `Scenario ${idx + 1}`;
+      const growth = growthCurve[idx] ?? growthCurve[growthCurve.length - 1];
+      const values = timeline.map((t) => Number((1 + growth * (t / Math.max(1, horizon))).toFixed(4)));
+      return { name, t: timeline, v: values };
+    });
+    const scenarioLabel = scenarioSeries.length ? scenarioSeries.map((s) => s.name).join(" / ") : "no scenarios";
+
+    res.json({
+      title: `Baseline vs Scenarios (${horizon}d)`,
+      caption: `Baseline (${baseSeries.name}) compared with ${scenarioLabel}`,
+      series: [baseSeries, ...scenarioSeries],
+    });
+  } catch (e) {
+    res.status(500).json({ error: "SIMULATION_FAILED", detail: String(e?.message || e) });
+  }
+});
+
 // ---------------- Stake / Unstake (JITO via Jupiter) ----------------
 function readStakeBody(req) {
   // Accept JSON, form, or query
