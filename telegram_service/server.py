@@ -54,6 +54,53 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
+# ---------- goblin-brand error formatter ----------
+def _goblin_error_message(err: HTTPStatusError | Exception) -> str:
+    try:
+        if isinstance(err, HTTPStatusError) and err.response is not None:
+            data = err.response.json()
+            if isinstance(data, dict) and not data.get("ok", True):
+                code = str(data.get("code") or "").upper()
+                d = data.get("details") or {}
+                sug = data.get("suggestion") or ""
+                def _fmt(x, dp=3):
+                    try:
+                        return (f"{float(x):.{dp}f}").rstrip("0").rstrip(".")
+                    except Exception:
+                        return str(x)
+                if code == "INSUFFICIENT_SOL":
+                    have = _fmt(d.get("have_sol"))
+                    need = _fmt(d.get("need_sol"))
+                    try_amt = _fmt(d.get("try_sol"))
+                    msg = f"⚠️ Not enough SOL, goblin. Need {need} incl. fees; you’ve got {have}."
+                    tip = f"\nTry: {try_amt} or top up." if try_amt else (f"\nTip: {sug}" if sug else "")
+                    return (msg + tip).strip()
+                if code == "INVALID_AMOUNT":
+                    ex = _fmt(d.get("example_sol") or 0.05)
+                    return f"⚠️ That amount is cursed.\nUse a positive number like {ex}."
+                if code == "ROUTE_NOT_FOUND":
+                    fr, to = d.get("from"), d.get("to")
+                    extra = f" {fr} → {to}" if fr and to else ""
+                    tip = f"\nTip: {sug}" if sug else "\nTry: smaller size or a more liquid token."
+                    return f"⚠️ Liquidity void:{extra}.{tip}"
+                if code == "PRICE_IMPACT_TOO_HIGH":
+                    impact, cap = d.get("impact_pct"), d.get("cap_pct")
+                    return f"⚠️ Route too spicy ({impact} > {cap}).\nTry: trim size or re‑quote."
+                if code in {"SWAP_FAILED", "UNEXPECTED"}:
+                    why = (d.get("short_reason") or "swap failed")
+                    tip = f"\nTip: {sug}" if sug else "\nTry: smaller size or re‑quote."
+                    return f"⚠️ Sim says no: {why}.{tip}"
+                if code == "STAKE_PROTOCOL_UNSUPPORTED":
+                    return "⚠️ Only Jito staking for now.\nUse JITOSOL."
+                # default fallback if code unrecognized
+                base = data.get("user_message") or str(err)
+                if sug:
+                    base += f"\nTip: {sug}"
+                return base
+    except Exception:
+        pass
+    return f"⚠️ {err}"
+
 # --- tiny in-memory plan cache per chat (for option CTAs) ---
 _LAST_PLAN: dict[int, dict] = {}   # chat_id -> plan dict
 
@@ -683,7 +730,7 @@ async def on_simulate_scenarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             body_text = ""
         snippet = (body_text or str(err))[:200]
         await _remove_inline_keyboard(q)
-        await q.message.reply_text(f"⚠️ Simulation failed: {snippet}")
+        await q.message.reply_text(_goblin_error_message(err))
         return
     except Exception as err:
         await _remove_inline_keyboard(q)
@@ -846,21 +893,8 @@ async def on_action_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 msg = f"🪙 {verb.capitalize()}d {fmt(float(amt))} {token} ✅"
                 if sig: msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
                 await q.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
-            except HTTPStatusError:
-                if verb == "stake":
-                    res = await _exec_post("swap", _swap_payload("SOL", token, amt, DEFAULT_SLIP_BPS))
-                    sig = pull_sig(res)
-                    summary = summarize_swap_like(res, "SOL", token, DEFAULT_SLIP_BPS)
-                    msg = f"🪙 Staked (via swap) ✅\n{summary}"
-                    if sig: msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
-                    await q.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
-                else:
-                    res = await _exec_post("swap", _swap_payload(token, "SOL", amt, DEFAULT_SLIP_BPS))
-                    sig = pull_sig(res)
-                    summary = summarize_swap_like(res, token, "SOL", DEFAULT_SLIP_BPS)
-                    msg = f"🪙 Unstaked (via swap) ✅\n{summary}"
-                    if sig: msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
-                    await q.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
+            except HTTPStatusError as e_http:
+                await q.message.reply_text(_goblin_error_message(e_http))
             return
     except Exception as err:
         logging.exception("Action button failed: %s", err)
@@ -923,7 +957,10 @@ async def quote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(meta)
         await update.message.reply_text("\n".join(lines))
     except Exception as err:
-        await update.message.reply_text(f"⚠️ Quote failed: {err}")
+        if isinstance(err, HTTPStatusError):
+            await update.message.reply_text(_goblin_error_message(err))
+        else:
+            await update.message.reply_text(f"⚠️ Quote failed: {err}")
 
 async def swap_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
@@ -946,7 +983,10 @@ async def swap_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
     except Exception as err:
-        await update.message.reply_text(f"⚠️ Swap failed: {err}")
+        if isinstance(err, HTTPStatusError):
+            await update.message.reply_text(_goblin_error_message(err))
+        else:
+            await update.message.reply_text(f"⚠️ Swap failed: {err}")
 
 async def stake_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
@@ -968,17 +1008,8 @@ async def stake_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if sig:
             msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
-    except HTTPStatusError:
-        try:
-            res = await _exec_post("swap", _swap_payload("SOL", token, amount, DEFAULT_SLIP_BPS))
-            sig = pull_sig(res)
-            summary = summarize_swap_like(res, "SOL", token, DEFAULT_SLIP_BPS)
-            msg = f"🪙 Staked (via swap) ✅\n{summary}"
-            if sig:
-                msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
-        except Exception as err2:
-            await update.message.reply_text(f"⚠️ Stake failed: {err2}")
+    except HTTPStatusError as e_http:
+        await update.message.reply_text(_goblin_error_message(e_http))
 
 async def unstake_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
@@ -1000,17 +1031,8 @@ async def unstake_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if sig:
             msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
-    except HTTPStatusError:
-        try:
-            res = await _exec_post("swap", _swap_payload(token, "SOL", amount, DEFAULT_SLIP_BPS))
-            sig = pull_sig(res)
-            summary = summarize_swap_like(res, token, "SOL", DEFAULT_SLIP_BPS)
-            msg = f"🪙 Unstaked (via swap) ✅\n{summary}"
-            if sig:
-                msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
-        except Exception as err2:
-            await update.message.reply_text(f"⚠️ Unstake failed: {err2}")
+    except HTTPStatusError as e_http:
+        await update.message.reply_text(_goblin_error_message(e_http))
 
 def add_handlers(a: Application):
     a.add_handler(CommandHandler("start", start))
