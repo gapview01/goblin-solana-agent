@@ -1,8 +1,10 @@
 # telegram_service/server.py
 import os, logging, inspect, math, html, json, time, re, asyncio, uuid, base64, io
+from aiohttp import web
 import httpx
 from httpx import HTTPStatusError
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram.request import HTTPXRequest
 from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -41,6 +43,8 @@ REQUIRE_LLM    = (os.getenv("REQUIRE_LLM_PLANNER") or "0").lower() in ("1", "tru
 # Executor (backend) config
 EXECUTOR_BASE_URL = (os.getenv("BASE_URL") or os.getenv("EXECUTOR_URL") or "").rstrip("/")
 EXECUTOR_TOKEN    = (os.getenv("EXECUTOR_TOKEN") or "").strip()
+SIM_WEBAPP_URL    = (os.getenv("SIM_WEBAPP_URL") or "").strip()
+SIM_API_URL       = (os.getenv("SIM_API_URL") or "").strip()  # optional external API for web app
 WALLET_ADDRESS    = (os.getenv("WALLET_ADDRESS") or "").strip()
 NETWORK           = (os.getenv("NETWORK") or "mainnet").strip()
 DEFAULT_SLIP_BPS  = int(os.getenv("DEFAULT_SLIPPAGE_BPS") or "100")
@@ -125,6 +129,225 @@ def _sim_cache_get(token: str) -> Optional[Dict[str, Any]]:
     plan = entry.get("plan")
     return plan if isinstance(plan, dict) else None
 
+# --- robust Telegram send helper ---
+async def _send_message_with_retry(ctx: ContextTypes.DEFAULT_TYPE, *, chat_id: int, text: str,
+                                   parse_mode: Optional[str] = None,
+                                   reply_markup: Optional[InlineKeyboardMarkup] = None,
+                                   reply_to_message_id: Optional[int] = None) -> None:
+    attempts = 2
+    last_err: Optional[Exception] = None
+    for i in range(attempts):
+        try:
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+                reply_to_message_id=reply_to_message_id,
+                disable_web_page_preview=True,
+            )
+            return
+        except Exception as err:  # retry once on transient network issues
+            last_err = err
+            await asyncio.sleep(1.5)
+    if last_err:
+        raise last_err
+
+# ---------- scenario compare helpers (ASCII) ----------
+def _capability_snapshot() -> Dict[str, Any]:
+    return {
+        "region": os.getenv("REGION") or "global",
+        "micro_sol": float(os.getenv("AUTO_MICRO_SOL") or "0.05"),
+        "impact_cap_bps": int(os.getenv("MAX_PRICE_IMPACT_BPS") or os.getenv("MAX_PRICE_IMPACT", "200")),
+        "unit": (os.getenv("DENOM") or "SOL").upper(),
+        "mode": (os.getenv("SIM_MODE") or "Asset"),
+    }
+
+def _build_scenario_tracks(exec_plan: Dict[str, Any]) -> list[Dict[str, Any]]:
+    # Choose up to 3 options from the exec-ready plan as tracks
+    tracks: list[Dict[str, Any]] = []
+    options = exec_plan.get("options") or []
+    for opt in options[:3]:
+        name = str(opt.get("name") or "Track").strip()
+        plan = opt.get("plan") or []
+        tracks.append({"name": name, "plan": plan})
+    # Fallback default labels if nothing present
+    if not tracks:
+        tracks = [
+            {"name": "Yield Track",   "plan": []},
+            {"name": "Factor Track",  "plan": []},
+        ]
+    return tracks[:3]
+
+def _ascii_bar(delta: float, max_abs: float) -> str:
+    if max_abs <= 0:
+        return "──────────"
+    length = int(round(10 * (abs(delta) / max_abs)))
+    if length <= 0:
+        return "──────────"
+    if length == 1:
+        return "▊"
+    return ("█" * (length - 1)) + "▊"
+
+def _fmt_delta(v: float, unit: str) -> str:
+    if unit == "USD":
+        sign = "+" if v >= 0 else "-"
+        return f"{sign}${abs(v):.2f}"
+    # default SOL-style
+    return f"{v:+.4f}"
+
+def _is_approve_micro_enabled(tracks: list[Dict[str, Any]], micro_sol: float) -> bool:
+    # Enabled only if the best track (first in list) has all amounts ≤ micro
+    if not tracks:
+        return False
+    best = tracks[0]
+    actions = best.get("plan") or []
+    for a in actions:
+        p = a.get("params") or {}
+        amt = p.get("amount") or p.get("amountLamports")
+        if amt is None:
+            continue
+        try:
+            val = float(amt) if not isinstance(amt, str) else float(str(amt))
+        except Exception:
+            return False
+        if val > micro_sol:
+            return False
+    return True
+
+def _render_compare_card(goal: str, unit: str, mode: str, cap: Dict[str, Any], series: list[Dict[str, Any]]) -> Dict[str, Any]:
+    # Expect first series to be baseline, followed by scenarios
+    baseline = series[0] if series else {"name": "Baseline", "t": [], "v": [1.0, 1.0]}
+    scenarios = series[1:4] if len(series) > 1 else []
+    def _delta(s: Dict[str, Any]) -> float:
+        vals = s.get("v") or []
+        if isinstance(vals, list) and len(vals) >= 2:
+            try:
+                start = float(vals[0]); end = float(vals[-1])
+                return end - start
+            except Exception:
+                return 0.0
+        return 0.0
+    deltas = [(_delta(s), s.get("name") or f"Scenario {i+1}") for i, s in enumerate(scenarios)]
+    max_abs = max([abs(d[0]) for d in deltas] + [0.0])
+
+    header = (
+        "📈 Scenario Compare (vs Do-Nothing Baseline)\n"
+        f"🎯 Goal: {goal} · Unit: {unit} · Mode: {mode}\n"
+        f"🛡️ Micro ≤ {cap.get('micro_sol')} {unit} · Impact ≤ {cap.get('impact_cap_bps')/100:.2f}% · Region: {cap.get('region')}\n\n"
+    )
+    lines = [f"Baseline (HODL): 0.0000  ───────────"]
+    for dv, name in deltas:
+        bar = _ascii_bar(dv, max_abs)
+        lines.append(f"{name}:  {_fmt_delta(dv, unit):>7}  {bar}")
+    footer = ("\n\n• Bars scaled to today’s best outcome.\n"
+              "• Quotes expire; refresh if TTL shows 0s.")
+    text = (header + "\n".join(lines) + footer)
+    if len(text) > 900:
+        text = text[:880] + "…"
+    return {"text": text}
+
+def _resample(values: list[float], width: int) -> list[float]:
+    if not values:
+        return [0.0] * width
+    n = len(values)
+    if n == 1:
+        return [values[0]] * width
+    out: list[float] = []
+    for i in range(width):
+        idx = round(i * (n - 1) / max(1, width - 1))
+        idx = max(0, min(n - 1, idx))
+        out.append(float(values[idx]))
+    return out
+
+_BLOCKS = "▁▂▃▄▅▆▇█"
+
+def _sparkline_series(values: list[float], width: int, vmin: float, vmax: float) -> str:
+    if width <= 0:
+        return ""
+    if vmax <= vmin + 1e-12:
+        return "─" * width
+    vals = _resample(values, width)
+    chars = []
+    for v in vals:
+        r = (float(v) - vmin) / (vmax - vmin)
+        r = 0.0 if r < 0 else (1.0 if r > 1 else r)
+        lvl = int(round(r * (len(_BLOCKS) - 1)))
+        chars.append(_BLOCKS[lvl])
+    return "".join(chars)
+
+def _render_projection_card(goal: str, unit: str, mode: str, cap: Dict[str, Any], series: list[Dict[str, Any]]) -> Dict[str, Any]:
+    # Build deltas vs baseline (normalized)
+    if not series:
+        return {"text": "📈 Projection unavailable."}
+    baseline = series[0]
+    base_v = [float(x) for x in (baseline.get("v") or [1.0, 1.0])]
+    b0 = base_v[0] if base_v else 1.0
+    if b0 == 0:
+        b0 = 1.0
+
+    tracks = series[1:4]
+    # Prepare global min/max across all deltas for consistent scaling
+    all_vals: list[float] = []
+    lines: list[tuple[str, list[float]]] = []
+
+    # Baseline deltas (flat zero)
+    base_delta = [ (float(v) / b0) - 1.0 for v in base_v ]
+    lines.append(("Baseline (HODL)", base_delta))
+    all_vals += base_delta
+
+    for s in tracks:
+        name = str(s.get("name") or "Scenario").strip()
+        vals = [float(x) for x in (s.get("v") or [])]
+        if not vals:
+            continue
+        d = [ (float(v) / b0) - 1.0 for v in vals ]
+        lines.append((name, d))
+        all_vals += d
+
+    if not lines:
+        return {"text": "📈 Projection unavailable."}
+
+    vmin = min(all_vals)
+    vmax = max(all_vals)
+    width = 24
+
+    header = (
+        "📈 Projection (vs Do-Nothing Baseline)\n"
+        f"🎯 Goal: {goal} · Unit: {unit} · Mode: {mode}\n"
+        f"🛡️ Micro ≤ {cap.get('micro_sol')} {unit} · Impact ≤ {cap.get('impact_cap_bps')/100:.2f}% · Region: {cap.get('region')}\n\n"
+    )
+
+    body_lines: list[str] = []
+    for (name, d) in lines:
+        spark = _sparkline_series(d, width, vmin, vmax)
+        final = d[-1] if d else 0.0
+        body_lines.append(f"{name}: {_fmt_delta(final, unit):>+7}  {spark}")
+
+    footer = "\n\n• Higher bars ≈ better relative outcome.\n• Quotes expire; refresh if TTL shows 0s."
+    text = header + "\n".join(body_lines) + footer
+    if len(text) > 900:
+        text = text[:880] + "…"
+    return {"text": text}
+
+# Compute per-series deltas vs baseline
+def _series_deltas(series: list[Dict[str, Any]]) -> list[tuple[str, float]]:
+    if not series:
+        return []
+    out: list[tuple[str, float]] = []
+    for s in series[1:4]:
+        name = str(s.get("name") or "Scenario").strip()
+        vals = s.get("v") or []
+        try:
+            if isinstance(vals, list) and len(vals) >= 2:
+                delta = float(vals[-1]) - float(vals[0])
+            else:
+                delta = 0.0
+        except Exception:
+            delta = 0.0
+        out.append((name, float(delta)))
+    return out
+
 # --- Planner import (prefer llm_planner, fallback to legacy, then demo)
 llm_plan = None
 try:
@@ -170,10 +393,17 @@ async def reconcile_webhook(app: Application):
     except Exception as err:
         logging.exception("Webhook reconcile failed; continuing anyway: %s", err)
 
-# Build the bot app
+# Build the bot app with higher Telegram HTTP timeouts
+_TG_REQUEST = HTTPXRequest(
+    connect_timeout=10.0,
+    read_timeout=30.0,
+    write_timeout=30.0,
+    pool_timeout=10.0,
+)
 app = (
     Application.builder()
     .token(TOKEN)
+    .request(_TG_REQUEST)
     .post_init(reconcile_webhook)
     .build()
 )
@@ -493,6 +723,43 @@ _PROTOCOLS = {
 def _proto(token: str) -> str:
     return _PROTOCOLS.get(token.upper(), token.lower())
 
+# ---------- wallet helpers (for timeouts/fallbacks) ----------
+async def _get_wallet_state() -> Dict[str, Any]:
+    sol = 0.0
+    lamports = 0
+    if WALLET_ADDRESS:
+        try:
+            bal = await _exec_post("balance", {"wallet": WALLET_ADDRESS, "token": "SOL", "network": NETWORK})
+            if isinstance(bal, dict):
+                if "sol" in bal:
+                    sol = float(bal.get("sol") or 0.0)
+                elif "uiAmount" in bal:
+                    sol = float(bal.get("uiAmount") or 0.0)
+                elif "lamports" in bal:
+                    lamports = int(bal.get("lamports") or 0)
+                    sol = lamports / 1_000_000_000
+                lamports = int(bal.get("lamports") or lamports or int(sol * 1_000_000_000))
+            else:
+                sol = float(bal or 0.0)
+        except Exception:
+            logging.debug("Wallet balance lookup failed", exc_info=True)
+    if not lamports:
+        lamports = int(sol * 1_000_000_000)
+    return {"sol_balance": float(sol), "lamports": int(lamports)}
+
+def _make_fallback_plan(goal: str) -> Dict[str, Any]:
+    return {
+        "summary": f"Plan for: {goal}",
+        "options": [
+            {"name": "Yield Track", "plan": [{"verb": "balance", "params": {}}, {"verb": "stake", "params": {"protocol": "jito", "amount": "0.05"}}]},
+            {"name": "Stable Track", "plan": [{"verb": "balance", "params": {}}, {"verb": "quote", "params": {"in": "SOL", "out": "USDC", "amount": "0.05"}}]},
+        ],
+        "actions": [{"verb": "balance", "params": {}}],
+        "simulation": {"horizon_days": 30},
+        "baseline": {"name": "Hold SOL"},
+        "frame": "CSA",
+    }
+
 # ---------- option helpers ----------
 def _actions_to_buttons(actions: list[dict]) -> list[list[InlineKeyboardButton]]:
     """Build inline buttons for a list of actions (balance/quote/swap/stake/unstake)."""
@@ -559,10 +826,27 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
     except Exception:
         pass
+
+    # Send immediate stub to improve perceived latency
+    stub_msg = None
+    try:
+        stub_msg = await ctx.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="🧠 Planning…",
+            reply_to_message_id=(update.message.message_id if update.message else None),
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        stub_msg = None
     logging.info("PLAN request user=%s goal=%r",
                  (update.effective_user.id if update.effective_user else "unknown"), goal)
 
     plan_text, wallet_state = await _call_planner(goal)
+    # If planner stalls or returns empty, build a minimal fallback so we always respond
+    if not plan_text or len(str(plan_text).strip()) < 2:
+        logging.warning("Planner returned empty; using fallback plan")
+        wallet_state = await _get_wallet_state()
+        plan_text = json.dumps(_make_fallback_plan(goal))
 
     try:
         parsed = json.loads(plan_text)
@@ -584,6 +868,13 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await send_playback_with_simulate(update, ctx, exec_plan)
 
+    # Clean up stub
+    try:
+        if stub_msg and stub_msg.message_id:
+            await ctx.bot.delete_message(chat_id=stub_msg.chat_id, message_id=stub_msg.message_id)
+    except Exception:
+        pass
+
     if SHOW_PLAN_JSON:
         code = f"<pre>{html.escape(plan_text)}</pre>"
         await update.message.reply_text(code, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
@@ -596,26 +887,49 @@ async def send_playback_with_simulate(update: Update, ctx: ContextTypes.DEFAULT_
     _sim_cache_put(token, plan)
 
     playback_text = plan.get("playback_text") or plan.get("summary") or "Plan ready. Simulate before executing"
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🧪 Simulate Scenarios", callback_data=f"SIM:{token}")]]
-    )
+    # Prefer Telegram Web App if URL configured; else fallback to callback handler
+    if SIM_WEBAPP_URL:
+            # Build a compact context (goal + top track names), URL-safe base64
+        try:
+            top_opts = []
+            for opt in list(plan.get("options") or [])[:3]:
+                top_opts.append({"name": str(opt.get("name") or "Track")})
+            ctx_obj = {
+                "goal": plan.get("summary") or plan.get("playback_text") or "Your goal",
+                "unit": "SOL",
+                "mode": "Asset",
+                "tracks": top_opts,
+            }
+            ctx_b64 = base64.urlsafe_b64encode(json.dumps(ctx_obj).encode()).decode()
+        except Exception:
+            ctx_b64 = ""
+        web_url = f"{SIM_WEBAPP_URL}?token={token}&ctx={ctx_b64}"
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🧪 Simulate Scenarios", web_app=WebAppInfo(url=web_url))]]
+        )
+    else:
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🧪 Simulate Scenarios", callback_data=f"SIM:{token}")]]
+        )
 
     if update.message:
-        await update.message.reply_text(
-            playback_text,
+        await _send_message_with_retry(
+            ctx,
+            chat_id=update.effective_chat.id,
+            text=playback_text,
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard,
-            disable_web_page_preview=True,
+            reply_to_message_id=update.message.message_id,
         )
     else:
         chat_id = update.effective_chat.id if update.effective_chat else None
         if chat_id is not None:
-            await ctx.bot.send_message(
+            await _send_message_with_retry(
+                ctx,
                 chat_id=chat_id,
                 text=playback_text,
                 parse_mode=ParseMode.HTML,
                 reply_markup=keyboard,
-                disable_web_page_preview=True,
             )
 
 async def _remove_inline_keyboard(callback_query) -> None:
@@ -660,6 +974,188 @@ def _render_series_chart(series: list[Dict[str, Any]], title: Optional[str]) -> 
     buf.seek(0)
     buf.name = "simulation.png"
     return buf
+
+# ---------- Mini Web App (served by PTB webhook aiohttp app) ----------
+_WEB_HTML = """
+<!doctype html>
+<html>
+  <head>
+    <meta charset=\"utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Goblin – Simulate Scenarios</title>
+    <script src=\"https://telegram.org/js/telegram-web-app.js\"></script>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; color: #e6e6e6; background: #0f0f13; }
+      .card { background: #16161d; border-radius: 12px; padding: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+      h1 { font-size: 18px; margin: 0 0 8px; }
+      pre { white-space: pre-wrap; word-break: break-word; }
+      .muted { color: #9aa0a6; font-size: 12px; }
+      .bar { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .btns { margin-top: 12px; display: grid; gap: 8px; grid-template-columns: repeat(2, 1fr); }
+      button { background: #1f2937; color: #fff; border: 0; border-radius: 8px; padding: 10px 12px; cursor: pointer; }
+      button.primary { background: #22c55e; color: #08130b; font-weight: 600; }
+      .dbg { position: fixed; top: 0; left: 0; right: 0; padding: 6px 10px; font-size: 11px; background: #332; color: #ff8; opacity: .9; }
+    </style>
+    <script>
+      async function load() {
+        const urlParams = new URLSearchParams(window.location.search);
+        const token = urlParams.get('token') || '';
+        document.getElementById('goal').textContent = 'Scenario Compare';
+        let tgOK = false, readyOK = false;
+        try {
+          const tg = window.Telegram && window.Telegram.WebApp;
+          if (tg) { tgOK = true; try { tg.ready(); readyOK = true; } catch(e) {} }
+        } catch (e) {}
+        const dbg = document.getElementById('dbg');
+        try {
+          const resp = await fetch('/telegram/simulate?token=' + encodeURIComponent(token));
+          const data = await resp.json();
+          document.getElementById('text').textContent = data.text || 'No data';
+          if (dbg) dbg.textContent = 'load:1 | tg:' + (tgOK?'1':'0') + ' | ready:' + (readyOK?'1':'0') + ' | api:' + (data && data.ok ? '1':'0');
+        } catch (e) {
+          document.getElementById('text').textContent = 'Failed to load simulation.';
+          if (dbg) dbg.textContent = 'load:1 | tg:' + (tgOK?'1':'0') + ' | ready:' + (readyOK?'1':'0') + ' | api:0';
+        }
+      }
+      window.addEventListener('load', load);
+    </script>
+  </head>
+  <body>
+    <div id=\"dbg\" class=\"dbg\">init…</div>
+    <div class=\"card\"> 
+      <h1 id=\"goal\">Scenario Compare</h1>
+      <pre id=\"text\" class=\"bar\">Loading…</pre>
+      <div class=\"muted\">Bars scaled to today’s best outcome. Quotes expire; refresh if TTL shows 0s.</div>
+      <div class=\"btns\">
+        <button class=\"primary\" onclick=\"window.Telegram && Telegram.WebApp && Telegram.WebApp.close()\">Approve ≤ micro</button>
+        <button onclick=\"location.reload()\">Refresh</button>
+        <button onclick=\"history.back()\">Edit Goal</button>
+        <button onclick=\"window.Telegram && Telegram.WebApp && Telegram.WebApp.close()\">Cancel</button>
+      </div>
+    </div>
+  </body>
+  </html>
+"""
+
+def _build_web_app(tg_app: Application) -> web.Application:
+    app = web.Application()
+
+    async def sim_page(_request: web.Request) -> web.Response:
+        headers = {"Content-Security-Policy": "frame-ancestors https://*.telegram.org https://web.telegram.org https://*.web.telegram.org https://t.me https://*.t.me"}
+        return web.Response(text=_WEB_HTML, content_type="text/html", headers=headers)
+
+    async def sim_api(request: web.Request) -> web.Response:
+        token = request.query.get("token") or ""
+        logging.debug("[sim_api] GET token=%s", token)
+        plan = _sim_cache_get(token) if token else None
+        if not isinstance(plan, dict):
+            logging.debug("[sim_api] cache_miss token=%s", token)
+            return web.json_response({"ok": False, "text": "Session expired. Press Simulate again."}, status=200)
+
+        # If we already computed the visual text, return it
+        visual_text = str(plan.get("visual_text") or "")
+        if visual_text:
+            logging.debug("[sim_api] cache_hit token=%s text_len=%d", token, len(visual_text))
+            return web.json_response({"ok": True, "text": visual_text}, status=200)
+
+        # Otherwise, compute on-demand (same logic as callback handler)
+        try:
+            options = plan.get("options") or []
+            payload: Dict[str, Any] = {
+                "frame": plan.get("frame") or "CSA",
+                "options": list(options)[:3],
+                "sizing": plan.get("sizing") or {},
+                "baseline": plan.get("baseline") or {"name": "Hold SOL"},
+                "horizon_days": plan.get("horizon_days") or 30,
+            }
+            account = plan.get("account") or plan.get("payer")
+            if account:
+                payload["account"] = account
+            logging.debug("[sim_api] POST simulate payload_keys=%s", list(payload.keys()))
+            resp = await _exec_post("simulate", payload)
+        except HTTPStatusError as e_http:
+            logging.exception("[sim_api] simulate HTTP error")
+            return web.json_response({"ok": False, "text": _goblin_error_message(e_http)}, status=200)
+        except Exception as err:
+            logging.exception("[sim_api] simulate failed: %s", err)
+            return web.json_response({"ok": False, "text": f"⚠️ Simulation failed: {err}"}, status=200)
+
+        raw_series = resp.get("series")
+        series = [s for s in raw_series if isinstance(s, dict)] if isinstance(raw_series, list) else []
+        try:
+            goal_text = plan.get("summary") or plan.get("playback_text") or "Your goal"
+            cap = _capability_snapshot()
+            projection = _render_projection_card(goal_text, cap.get("unit") or "SOL", cap.get("mode") or "Asset", cap, series)
+            deltas = _series_deltas(series)
+            max_abs = max([abs(d[1]) for d in deltas] + [0.0])
+            header = (
+                "📈 Scenario Compare (vs Do-Nothing Baseline)\n"
+                f"🎯 Goal: {goal_text} · Unit: {cap.get('unit') or 'SOL'} · Mode: {cap.get('mode') or 'Asset'}\n"
+                f"🛡️ Micro ≤ {cap.get('micro_sol')} {cap.get('unit') or 'SOL'} · Impact ≤ {cap.get('impact_cap_bps')/100:.2f}% · Region: {cap.get('region')}\n\n"
+            )
+            body = ["Baseline (HODL): 0.0000  ───────────"]
+            for name, dv in deltas:
+                bar = _ascii_bar(dv, max_abs)
+                body.append(f"{name}:  {_fmt_delta(dv, cap.get('unit') or 'SOL'):>7}  {bar}")
+            footer = "\n\n• Bars scaled to today’s best outcome.\n• Quotes expire; refresh if TTL shows 0s."
+            compare_text = header + "\n".join(body) + footer
+            visual_text = projection["text"] + "\n\n" + compare_text
+            plan_copy = dict(plan)
+            plan_copy["visual_text"] = visual_text
+            _sim_cache_put(token, plan_copy)
+            logging.debug("[sim_api] computed text_len=%d token=%s", len(visual_text), token)
+            return web.json_response({"ok": True, "text": visual_text}, status=200)
+        except Exception:
+            logging.exception("[sim_api] render failed")
+            return web.json_response({"ok": False, "text": "⚠️ Render failed."}, status=200)
+
+    async def webhook_handler(request: web.Request) -> web.Response:
+        if request.method != "POST":
+            return web.Response(status=405)
+        # Verify Telegram secret token if provided
+        secret_hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if WEBHOOK_SECRET and secret_hdr != WEBHOOK_SECRET:
+            return web.Response(status=403, text="forbidden")
+        try:
+            data = await request.json()
+        except Exception:
+            return web.Response(status=400, text="bad json")
+        try:
+            update = Update.de_json(data, tg_app.bot)
+            await tg_app.update_queue.put(update)
+        except Exception:
+            logging.exception("webhook_handler failed to enqueue update")
+            return web.Response(status=500, text="enqueue failed")
+        return web.json_response({"ok": True})
+
+    async def health(_request: web.Request) -> web.Response:
+        return web.Response(text="ok")
+
+    # Routes
+    app.router.add_get("/webapp/sim", sim_page)
+    app.router.add_get("/telegram/simulate", sim_api)
+    app.router.add_post(f"/webhook/{WEBHOOK_SECRET}", webhook_handler)
+    app.router.add_get("/health", health)
+
+    async def on_startup(_app: web.Application) -> None:
+        try:
+            await tg_app.initialize()
+            await tg_app.start()
+            await reconcile_webhook(tg_app)
+            logging.info("Startup complete")
+        except Exception:
+            logging.exception("Startup failed")
+
+    async def on_cleanup(_app: web.Application) -> None:
+        try:
+            await tg_app.stop()
+            await tg_app.shutdown()
+        except Exception:
+            logging.exception("Shutdown failed")
+
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
+    return app
 
 def _series_summary_lines(series: list[Dict[str, Any]], title: Optional[str], caption: Optional[str]) -> list[str]:
     lines: list[str] = []
@@ -760,15 +1256,108 @@ async def on_simulate_scenarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     raw_series = resp.get("series")
     series = [s for s in raw_series if isinstance(s, dict)] if isinstance(raw_series, list) else []
+    # Expose an in-memory last-visual text so WebApp can fetch it
+    try:
+        goal_text = plan.get("summary") or plan.get("playback_text") or "Your goal"
+        cap = _capability_snapshot()
+        projection = _render_projection_card(goal_text, cap.get("unit") or "SOL", cap.get("mode") or "Asset", cap, series)
+        deltas = _series_deltas(series)
+        max_abs = max([abs(d[1]) for d in deltas] + [0.0])
+        header = (
+            "📈 Scenario Compare (vs Do-Nothing Baseline)\n"
+            f"🎯 Goal: {goal_text} · Unit: {cap.get('unit') or 'SOL'} · Mode: {cap.get('mode') or 'Asset'}\n"
+            f"🛡️ Micro ≤ {cap.get('micro_sol')} {cap.get('unit') or 'SOL'} · Impact ≤ {cap.get('impact_cap_bps')/100:.2f}% · Region: {cap.get('region')}\n\n"
+        )
+        body = ["Baseline (HODL): 0.0000  ───────────"]
+        for name, dv in deltas:
+            bar = _ascii_bar(dv, max_abs)
+            body.append(f"{name}:  {_fmt_delta(dv, cap.get('unit') or 'SOL'):>7}  {bar}")
+        footer = "\n\n• Bars scaled to today’s best outcome.\n• Quotes expire; refresh if TTL shows 0s."
+        compare_text = header + "\n".join(body) + footer
+        visual_text = projection["text"] + "\n\n" + compare_text
+        # Store for WebApp retrieval (short TTL via SIM cache timestamp)
+        plan_copy = dict(plan)
+        plan_copy["visual_text"] = visual_text
+        _sim_cache_put(token, plan_copy)
+    except Exception:
+        pass
+    # Render ASCII compare below the playback message
+    try:
+        goal_text = plan.get("summary") or plan.get("playback_text") or "Your goal"
+        cap = _capability_snapshot()
+        # Projection visual (sparklines) followed by compact compare
+        projection = _render_projection_card(goal_text, cap.get("unit") or "SOL", cap.get("mode") or "Asset", cap, series)
+        compare = _render_compare_card(goal_text, cap.get("unit") or "SOL", cap.get("mode") or "Asset", cap, series)
+        # Build Scenario Compare section to match spec (ASCII bars scaled)
+        deltas = _series_deltas(series)
+        max_abs = max([abs(d[1]) for d in deltas] + [0.0])
+        header = (
+            "📈 Scenario Compare (vs Do-Nothing Baseline)\n"
+            f"🎯 Goal: {goal_text} · Unit: {cap.get('unit') or 'SOL'} · Mode: {cap.get('mode') or 'Asset'}\n"
+            f"🛡️ Micro ≤ {cap.get('micro_sol')} {cap.get('unit') or 'SOL'} · Impact ≤ {cap.get('impact_cap_bps')/100:.2f}% · Region: {cap.get('region')}\n\n"
+        )
+        body = ["Baseline (HODL): 0.0000  ───────────"]
+        for name, dv in deltas:
+            bar = _ascii_bar(dv, max_abs)
+            body.append(f"{name}:  {_fmt_delta(dv, cap.get('unit') or 'SOL'):>7}  {bar}")
+        footer = "\n\n• Bars scaled to today’s best outcome.\n• Quotes expire; refresh if TTL shows 0s."
+        compare_text = header + "\n".join(body) + footer
+        # Final text: projection first (forward view), then Scenario Compare
+        text = projection["text"] + "\n\n" + compare_text
+        buttons = []
+        tracks = _build_scenario_tracks(plan)
+        if _is_approve_micro_enabled(tracks, float(cap.get("micro_sol") or 0.05)):
+            buttons.append([InlineKeyboardButton("✅ Approve ≤ micro", callback_data=f"approve_micro:{plan.get('token')}")])
+        buttons.append([InlineKeyboardButton("📝 Edit Goal", callback_data="edit_goal")])
+        buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh_compare:{plan.get('token')}")])
+        buttons.append([InlineKeyboardButton("🛑 Cancel", callback_data="cancel")])
+        keyboard = InlineKeyboardMarkup(buttons)
+        await _send_message_with_retry(
+            ctx,
+            chat_id=update.effective_chat.id,
+            text=visual_text if 'visual_text' in locals() else text,
+            reply_to_message_id=q.message.message_id,
+            parse_mode=None,
+            reply_markup=keyboard,
+        )
+        return
+    except Exception:
+        pass
+    # Fallbacks: still produce the visual compare instead of raw summary
     if series:
-        chart_buf = _render_series_chart(series, title)
-        if chart_buf:
-            await q.message.reply_photo(photo=chart_buf, caption=caption or title)
+        try:
+            goal_text = plan.get("summary") or plan.get("playback_text") or "Your goal"
+            cap = _capability_snapshot()
+            projection = _render_projection_card(goal_text, cap.get("unit") or "SOL", cap.get("mode") or "Asset", cap, series)
+            deltas = _series_deltas(series)
+            max_abs = max([abs(d[1]) for d in deltas] + [0.0])
+            header = (
+                "📈 Scenario Compare (vs Do-Nothing Baseline)\n"
+                f"🎯 Goal: {goal_text} · Unit: {cap.get('unit') or 'SOL'} · Mode: {cap.get('mode') or 'Asset'}\n"
+                f"🛡️ Micro ≤ {cap.get('micro_sol')} {cap.get('unit') or 'SOL'} · Impact ≤ {cap.get('impact_cap_bps')/100:.2f}% · Region: {cap.get('region')}\n\n"
+            )
+            body = ["Baseline (HODL): 0.0000  ───────────"]
+            for name, dv in deltas:
+                bar = _ascii_bar(dv, max_abs)
+                body.append(f"{name}:  {_fmt_delta(dv, cap.get('unit') or 'SOL'):>7}  {bar}")
+            footer = "\n\n• Bars scaled to today’s best outcome.\n• Quotes expire; refresh if TTL shows 0s."
+            compare_text = header + "\n".join(body) + footer
+            text = projection["text"] + "\n\n" + compare_text
+            await _send_message_with_retry(
+                ctx,
+                chat_id=update.effective_chat.id,
+                text=text,
+                reply_to_message_id=q.message.message_id,
+                parse_mode=None,
+                reply_markup=None,
+            )
             return
+        except Exception:
+            pass
+        # absolute last resort
         lines = _series_summary_lines(series, title, caption)
         await q.message.reply_text("\n".join(lines))
         return
-
     await q.message.reply_text("⚠️ Unexpected simulation response.")
 
 # ---- Option CTA handler: show that option’s mini-brief and its actions
@@ -1038,6 +1627,7 @@ def add_handlers(a: Application):
     a.add_handler(CommandHandler("start", start))
     a.add_handler(CommandHandler("ping", ping))
     a.add_handler(CommandHandler("plan", plan_cmd))
+    # keep callback handler for legacy clients; web app button is preferred
     a.add_handler(CallbackQueryHandler(on_simulate_scenarios, pattern=r"^SIM:"))
     a.add_handler(CallbackQueryHandler(on_option_button, pattern=r"^opt:"))  # option CTAs
     a.add_handler(CallbackQueryHandler(on_action_button, pattern=r"^run:"))  # primitive CTAs
@@ -1052,21 +1642,14 @@ def add_handlers(a: Application):
 def main():
     add_handlers(app)
     logging.info("Planner wired? %s from %s", llm_plan is not None, getattr(llm_plan, "__module__", None))
+    # Always run a single aiohttp app that serves both webhook + webapp routes
+    web_app = _build_web_app(app)
+    # Configure Telegram webhook URL on startup hook; here log intent
     if WEBHOOK_BASE_URL:
-        url_path = f"webhook/{WEBHOOK_SECRET}"
-        webhook_url = f"{WEBHOOK_BASE_URL}/{url_path}"
-        logging.info("Starting webhook server at %s", webhook_url)
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=url_path,
-            webhook_url=webhook_url,
-            secret_token=WEBHOOK_SECRET,
-            drop_pending_updates=True,
-        )
+        logging.info("Serving at 0.0.0.0:%s and expecting webhook at %s/webhook/%s", PORT, WEBHOOK_BASE_URL, WEBHOOK_SECRET)
     else:
-        logging.info("WEBHOOK_BASE_URL not set -> polling mode (not suitable for Cloud Run)")
-        app.run_polling(drop_pending_updates=True)
+        logging.warning("WEBHOOK_BASE_URL not set; Telegram webhook cannot be reconciled")
+    web.run_app(web_app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
     main()
