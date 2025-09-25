@@ -973,7 +973,13 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logging.info("PLAN request user=%s goal=%r",
                  (update.effective_user.id if update.effective_user else "unknown"), goal)
 
-    plan_text, wallet_state = await _call_planner(goal)
+    # Planner call with watchdog to avoid silent stalls during rollouts
+    try:
+        plan_text, wallet_state = await asyncio.wait_for(_call_planner(goal), timeout=150.0)
+    except asyncio.TimeoutError:
+        logging.warning("planner:timeout after 150s; using fallback plan")
+        wallet_state = await _get_wallet_state()
+        plan_text = json.dumps(_make_fallback_plan(goal))
     # If planner stalls or returns empty, build a minimal fallback so we always respond
     if not plan_text or len(str(plan_text).strip()) < 2:
         logging.warning("Planner returned empty; using fallback plan")
