@@ -132,6 +132,62 @@ def render_compare_card(plan: Dict[str, Any]) -> str:
     return f"<pre>{header}{escape_html(body)}{footer}</pre>"
 
 
+# -------- Simple plan renderer (pre-compare summary) --------
+def _fmt_sol(v: float, dp: int = 3) -> str:
+    try:
+        return (f"{float(v):.{dp}f}").rstrip("0").rstrip(".")
+    except Exception:
+        return str(v)
+
+
+def _strategy_emoji(name: str, strategy: str) -> str:
+    s = f"{name} {strategy}".lower()
+    if any(k in s for k in ["stake", "yield", "jito", "msol", "bsol", "lsd"]):
+        return "🌱"
+    if any(k in s for k in ["stable", "usdc", "preservation", "bluechip", "defensive"]):
+        return "💎"
+    if any(k in s for k in ["momentum", "trend", "alpha", "growth"]):
+        return "📈"
+    if any(k in s for k in ["arb", "arbitrage", "basis", "spread"]):
+        return "🔀"
+    if any(k in s for k in ["experimental", "pilot", "test"]):
+        return "🧪"
+    return "🌱"
+
+
+def render_simple_plan(plan: Dict[str, Any]) -> str:
+    goal = str(plan.get("goal") or "your goal").strip()
+    frame = str(plan.get("frame") or "CSA").strip()
+    options = plan.get("options") or []
+    num_strats = max(0, min(3, len(options)))
+    sizing = plan.get("sizing") or {}
+    final_sol = sizing.get("final_sol") or sizing.get("desired_sol") or 0.0
+
+    lines: list[str] = []
+    lines.append(f"🧠 Goal: {goal}")
+    lines.append("")
+    lines.append("📋 Plan Summary")
+    lines.append(f"• {num_strats or len(options)} strategies generated")
+    if final_sol:
+        lines.append(f"• Using ~{_fmt_sol(final_sol)} SOL (after buffer)")
+    lines.append(f"• Frame: {frame} (Conservative · Standard · Aggressive)")
+    lines.append("")
+    lines.append("🚀 Strategies")
+    for i, opt in enumerate(options[:3], start=1):
+        name = str(opt.get("name") or f"Strategy {i}")
+        why = str(opt.get("strategy") or opt.get("rationale") or "").strip() or str(opt.get("bucket") or "")
+        emoji = _strategy_emoji(name, why)
+        one_liner = " ".join(why.split())[:140]
+        lines.append(f"{i}. {emoji} {name} — {one_liner}")
+    lines.append("")
+    risks = plan.get("risks") or []
+    if isinstance(risks, list) and risks:
+        lines.append("⚠️ Risks")
+        for r in risks[:4]:
+            lines.append(f"• {str(r)}")
+
+    return "\n".join(lines)
+
 # -------- Layer-3 prompts for new Grow commands --------
 GOAL_HELP = """🧠 Set a goal.
 Try:

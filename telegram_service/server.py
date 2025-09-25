@@ -31,6 +31,7 @@ from bot.texts import (
     START_TEXT, CHECK_TEXT, DO_TEXT, GROW_MENU_TEXT, GROW_TEXT,
     QUOTE_HELP, SWAP_HELP, STAKE_HELP, UNSTAKE_HELP, PLAN_HELP, GOAL_HELP, EARN_HELP,
     ERR_TOO_MUCH, ERR_UNKNOWN_TOKEN, ERR_MISSING,
+    render_simple_plan,
 )
 from bot.handlers.compare import show_compare as _show_compare_card
 from bot.nlp import (
@@ -996,6 +997,41 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Warm Jupiter list in background (faster first quote)
     asyncio.create_task(_jup_tokenlist())
 
+    # Render simplified plan summary first
+    try:
+        logging.info("plan:render_simple")
+        simple = render_simple_plan(exec_plan)
+        # Inline keyboard with a single Simulate button
+        if SIM_WEBAPP_URL:
+            try:
+                top_opts = []
+                for opt in list(exec_plan.get("options") or [])[:3]:
+                    top_opts.append({"name": str(opt.get("name") or "Track")})
+                ctx_obj = {
+                    "goal": exec_plan.get("summary") or exec_plan.get("playback_text") or "Your goal",
+                    "unit": "SOL",
+                    "mode": "Asset",
+                    "tracks": top_opts,
+                }
+                ctx_b64 = base64.urlsafe_b64encode(json.dumps(ctx_obj).encode()).decode()
+            except Exception:
+                ctx_b64 = ""
+            web_url = f"{SIM_WEBAPP_URL}?token={token}&ctx={ctx_b64}"
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Simulate Scenarios", web_app=WebAppInfo(url=web_url))]])
+        else:
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Simulate Scenarios", callback_data=f"SIM:{token}")]])
+        await _send_message_with_retry(
+            ctx,
+            chat_id=update.effective_chat.id,
+            text=simple,
+            parse_mode=None,
+            reply_markup=keyboard,
+            reply_to_message_id=update.message.message_id if update.message else None,
+        )
+    except Exception:
+        pass
+
+    # Then send full playback with simulate (kept for backward-compat / rich context)
     await send_playback_with_simulate(update, ctx, exec_plan)
 
     # Clean up stub
