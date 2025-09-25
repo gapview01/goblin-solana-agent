@@ -28,13 +28,13 @@ if str(ROOT) not in sys.path:
 
 from planner.exec_ready_planner import build_exec_ready_plan
 from bot.texts import (
-    START_TEXT, CHECK_TEXT, DO_TEXT, GROW_TEXT,
-    QUOTE_HELP, SWAP_HELP, STAKE_HELP, UNSTAKE_HELP, PLAN_HELP,
+    START_TEXT, CHECK_TEXT, DO_TEXT, GROW_MENU_TEXT,
+    QUOTE_HELP, SWAP_HELP, STAKE_HELP, UNSTAKE_HELP, PLAN_HELP, GOAL_HELP, EARN_HELP,
     ERR_TOO_MUCH, ERR_UNKNOWN_TOKEN, ERR_MISSING,
 )
 from bot.handlers.compare import show_compare as _show_compare_card
 from bot.nlp import (
-    parse_quote, parse_swap, parse_stake, parse_unstake, parse_plan,
+    parse_quote, parse_swap, parse_stake, parse_unstake, parse_plan, parse_goal, parse_earn,
 )
 
 # ---------- basic config (env)
@@ -856,7 +856,28 @@ async def do_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def grow_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logging.info("menu:grow")
-    await update.message.reply_text(GROW_TEXT)
+    text = (update.message.text or "").lower()
+    if " menu" in text or text.strip() == "/grow menu":
+        return await update.message.reply_text(GROW_MENU_TEXT)
+    return await update.message.reply_text(GOAL_HELP)
+
+async def goal_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    raw = update.message.text or ""
+    goal = raw.partition(" ")[2].strip() or " ".join(ctx.args or []).strip()
+    if not goal or raw.strip().lower().endswith("help"):
+        logging.info("help:goal")
+        return await update.message.reply_text(GOAL_HELP)
+    return await plan_cmd(update, ctx)
+
+async def earn_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    argv = _args(ctx)
+    raw = (update.message.text or "").strip()
+    if len(argv) < 2 or raw.strip().lower().endswith("help"):
+        logging.info("help:earn")
+        return await update.message.reply_text(EARN_HELP)
+    token = _norm(argv[0]); amount = argv[1]
+    ctx.args = [token, amount]
+    return await stake_cmd(update, ctx)
 
 # ---------- natural-language router (plain text -> canonical commands)
 async def nl_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -910,8 +931,22 @@ async def nl_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return await plan_cmd(update, ctx)
         logging.info("help:plan")
         return await update.message.reply_text(PLAN_HELP)
-    # Not a recognized NL command; ignore so other handlers can process
-    return
+    if lower.startswith("goal"):
+        cmd = parse_goal(text)
+        if cmd:
+            logging.info("nl:goal parsed")
+            ctx.args = _dispatch(cmd)
+            return await goal_cmd(update, ctx)
+        logging.info("help:goal")
+        return await update.message.reply_text(GOAL_HELP)
+    if lower.startswith("earn"):
+        cmd = parse_earn(text)
+        if cmd:
+            logging.info("nl:earn parsed")
+            ctx.args = _dispatch(cmd)
+            return await earn_cmd(update, ctx)
+        logging.info("help:earn")
+        return await update.message.reply_text(EARN_HELP)
 
 # ---- /plan: build exec-ready plan and surface simulate CTA
 async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1788,6 +1823,8 @@ def add_handlers(a: Application):
     a.add_handler(CommandHandler("check", check_menu))
     a.add_handler(CommandHandler("do", do_menu))
     a.add_handler(CommandHandler("grow", grow_menu))
+    a.add_handler(CommandHandler("goal", goal_cmd))
+    a.add_handler(CommandHandler("earn", earn_cmd))
     a.add_handler(CommandHandler("ping", ping))
     a.add_handler(CommandHandler("plan", plan_cmd))
     # keep callback handler for legacy clients; web app button is preferred

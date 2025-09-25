@@ -1,8 +1,8 @@
 START_TEXT = """👾 GoblinBot Ready ✅
 
-💰 /check (balance, quote)
-🛠️ /do (swap, stake, unstake)
-🌱 /grow (plan)
+💰 Check (balance, quote)
+🛠️ Do (swap, stake, unstake)
+🌱 Grow (goal, earn)
 """
 
 CHECK_TEXT = """💰 Check Options:
@@ -16,10 +16,9 @@ DO_TEXT = """🛠️ Do Options:
 - 📤 /unstake  — withdraw your deposit
 """
 
-GROW_TEXT = """🌱 Grow Options:
-- 🧠 /plan     — set a goal and get a plan
-
-Takes ~7 minutes ⏳😅
+GROW_MENU_TEXT = """🌱 Grow Options:
+- 🧠 /goal     — set a goal → plan → compare → simulate
+- 💹 /earn     — quick path to staking
 """
 
 QUOTE_HELP = """📊 Quote time!
@@ -132,4 +131,21 @@ def render_compare_card(plan: Dict[str, Any]) -> str:
     footer = "\n\n• Quotes expire; refresh if TTL shows 0s."
     body = "\n".join(rows)
     return f"<pre>{header}{escape_html(body)}{footer}</pre>"
+
+
+# -------- Layer-3 prompts for new Grow commands --------
+GOAL_HELP = """🧠 Set a goal.
+Try:
+- 🧠 /goal grow 1 SOL to 10 SOL
+- 🧠 /goal earn yield on 2 SOL this month
+
+(You can also describe your goal in plain English.)
+"""
+
+EARN_HELP = """💹 Earn with staking.
+Examples:
+- 💹 /earn SOL 1
+- 💹 /earn mSOL 2
+- ✍️ Custom — type: /earn TOKEN AMOUNT
+"""
 
