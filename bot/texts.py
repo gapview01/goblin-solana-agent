@@ -18,6 +18,8 @@ DO_TEXT = """🛠️ Do Options:
 
 GROW_TEXT = """🌱 Grow Options:
 - 🧠 /plan     — set a goal and get a plan
+
+Takes ~7 minutes ⏳😅
 """
 
 QUOTE_HELP = """📊 Quote time!
