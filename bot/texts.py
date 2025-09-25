@@ -59,8 +59,6 @@ Examples:
 
 PLAN_HELP = """🧠 Set a goal & get a plan.
 Use /plan <describe your goals in plain English>
-
-⚠️ DISCLAIMER - NOT FINANCIAL ADVICE
 """
 
 ERR_TOO_MUCH = "⚠️ That’s more than your balance ({balance}). Try a smaller amount or MAX."
