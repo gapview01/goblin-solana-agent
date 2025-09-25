@@ -6,8 +6,8 @@ START_TEXT = """👾 GoblinBot Ready ✅
 """
 
 CHECK_TEXT = """💰 Check Options:
-- 👛 /balance  — see tokens in your wallet
-- 📊 /quote    — estimate what you’d receive on a swap
+- 👛 /balance — see tokens in your wallet
+- 📊 /quote — estimate what you’d receive on a swap
 """
 
 DO_TEXT = """🛠️ Do Options:
@@ -17,7 +17,7 @@ DO_TEXT = """🛠️ Do Options:
 """
 
 GROW_MENU_TEXT = """🌱 Grow Options:
-- 🧠 /plan — set a goal and get a plan (Takes ~7 minutes ⏳😅)
+- 🧠 /plan — set a goal and get a plan (Takes ~7 mins ⏳😅)
 - 📈 /scale — grow 1 SOL to 10 SOL
 - 💹 /earn — earn yield on your SOL this month
 """
