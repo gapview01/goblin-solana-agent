@@ -152,7 +152,6 @@ Examples:
 # Level-2 Grow (screenshot style)
 GROW_TEXT = """🌱 Grow Options:
 - 🧠 /plan     — set a goal and get a plan
-
 Takes ~7 minutes ⏳😅
 """
 
