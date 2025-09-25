@@ -519,14 +519,18 @@ async def _call_planner(goal: str) -> tuple[str, Dict[str, Any]]:
         if "source" in sig.parameters:
             kwargs["source"] = "telegram"
 
+        start_ts = time.time()
+        logging.info("planner:start")
         if "goal" in sig.parameters and ("text" not in sig.parameters):
-            res = llm_plan(goal, **kwargs)
+            # Run potentially blocking LLM call off the event loop
+            res = await asyncio.to_thread(llm_plan, goal, **kwargs)
         else:
             kwargs["text"] = goal
-            res = llm_plan(**kwargs)
+            res = await asyncio.to_thread(llm_plan, **kwargs)
 
         if inspect.isawaitable(res):
             res = await res
+        logging.info("planner:end %.1fs", time.time() - start_ts)
         if isinstance(res, (dict, list)):
             return json.dumps(res), wallet_state
         return str(res), wallet_state
