@@ -58,11 +58,9 @@ Examples:
 """
 
 PLAN_HELP = """🧠 Set a goal & get a plan.
-Try:
-- 🧠 /plan grow 1 SOL to 10 SOL
-- 🧠 /plan earn yield on 2 SOL this month
+Use /plan <describe your goals in plain English>
 
-(You can also describe your goal in plain English.)
+⚠️ DISCLAIMER - NOT FINANCIAL ADVICE
 """
 
 ERR_TOO_MUCH = "⚠️ That’s more than your balance ({balance}). Try a smaller amount or MAX."
