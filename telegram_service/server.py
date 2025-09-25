@@ -33,6 +33,7 @@ from bot.texts import (
     ERR_TOO_MUCH, ERR_UNKNOWN_TOKEN, ERR_MISSING,
     render_simple_plan, NO_PLAN_FOUND,
 )
+from bot.renderers.plan_renderer import render_plan_simple
 from bot.handlers.compare import show_compare as _show_compare_card
 from bot.nlp import (
     parse_quote, parse_swap, parse_stake, parse_unstake, parse_plan, parse_goal, parse_earn,
@@ -1006,7 +1007,7 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Render simplified plan summary first
     try:
         logging.info("plan:render_simple")
-        simple = render_simple_plan(exec_plan)
+        simple = render_plan_simple(goal, exec_plan)
         await _send_message_with_retry(
             ctx,
             chat_id=update.effective_chat.id,
