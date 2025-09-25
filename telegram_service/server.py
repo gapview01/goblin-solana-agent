@@ -32,6 +32,7 @@ from bot.texts import (
     QUOTE_HELP, SWAP_HELP, STAKE_HELP, UNSTAKE_HELP, PLAN_HELP,
     ERR_TOO_MUCH, ERR_UNKNOWN_TOKEN, ERR_MISSING,
 )
+from bot.handlers.compare import show_compare as _show_compare_card
 from bot.nlp import (
     parse_quote, parse_swap, parse_stake, parse_unstake, parse_plan,
 )
@@ -1442,27 +1443,29 @@ async def on_simulate_scenarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         _sim_cache_put(token, plan_copy)
     except Exception:
         pass
-    # Render ASCII compare below the playback message
+    # Render inline compare card below the playback message
     try:
-        # Simplify inline message too (no duplicate to playback)
-        compare_text = _render_simple_compare_text(series)
-        text = compare_text
-        buttons = []
-        tracks = _build_scenario_tracks(plan)
-        if _is_approve_micro_enabled(tracks, float(cap.get("micro_sol") or 0.05)):
-            buttons.append([InlineKeyboardButton("✅ Approve ≤ micro", callback_data=f"approve_micro:{plan.get('token')}")])
-        buttons.append([InlineKeyboardButton("📝 Edit Goal", callback_data="edit_goal")])
-        buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh_compare:{plan.get('token')}")])
-        buttons.append([InlineKeyboardButton("🛑 Cancel", callback_data="cancel")])
-        keyboard = InlineKeyboardMarkup(buttons)
-        await _send_message_with_retry(
-            ctx,
-            chat_id=update.effective_chat.id,
-            text=visual_text if 'visual_text' in locals() else text,
-            reply_to_message_id=q.message.message_id,
-            parse_mode=None,
-            reply_markup=keyboard,
-        )
+        compare_payload = {
+            "goal": goal_text,
+            "horizon": f"{int(payload.get('horizon_days') or 30)}d",
+            "region": cap.get("region") or "global",
+            "micro_budget": f"{cap.get('micro_sol')} {cap.get('unit') or 'SOL'}",
+            "max_impact": f"{cap.get('impact_cap_bps')/100:.2f}%",
+            "baseline": {"display_name": (plan.get("baseline") or {}).get("name") or "Do-Nothing (Baseline)"},
+            "scenarios": [
+                {"id": f"s{i}", "display_name": str(s.get("name") or f"Scenario {i}"), "delta_sol": float(s.get("v", [0,0])[-1]) - float(s.get("v", [0,0])[0]) if (s.get("v") and len(s.get("v"))>=2) else 0.0}
+                for i, s in enumerate(series[1:5], start=1)
+            ],
+            "token": plan.get("token") or token,
+        }
+        # store for callbacks
+        try:
+            chat_id = update.effective_chat.id if update.effective_chat else None
+            if isinstance(chat_id, int):
+                app.chat_data.get(chat_id, {}).setdefault("last_plan", compare_payload)
+        except Exception:
+            pass
+        await _show_compare_card(update, ctx, compare_payload)
         return
     except Exception:
         pass
