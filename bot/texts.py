@@ -2,7 +2,7 @@ START_TEXT = """👾 GoblinBot Ready ✅
 
 💰 /check (balance, quote)
 🛠️ /do (swap, stake, unstake)
-🌱 /grow (goal, earn)
+🌱 /grow (plan, scale, target)
 """
 
 CHECK_TEXT = """💰 Check Options:
