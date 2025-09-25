@@ -1,8 +1,8 @@
 START_TEXT = """👾 GoblinBot Ready ✅
 
-💰 Check (balance, quote)
-🛠️ Do (swap, stake, unstake)
-🌱 Grow (goal, earn)
+💰 /check (balance, quote)
+🛠️ /do (swap, stake, unstake)
+🌱 /grow (goal, earn)
 """
 
 CHECK_TEXT = """💰 Check Options:
