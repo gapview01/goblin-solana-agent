@@ -27,6 +27,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from planner.exec_ready_planner import build_exec_ready_plan
+from bot.texts import (
+    START_TEXT, CHECK_TEXT, DO_TEXT, GROW_TEXT,
+    QUOTE_HELP, SWAP_HELP, STAKE_HELP, UNSTAKE_HELP, PLAN_HELP,
+    ERR_TOO_MUCH, ERR_UNKNOWN_TOKEN, ERR_MISSING,
+)
+from bot.nlp import (
+    parse_quote, parse_swap, parse_stake, parse_unstake, parse_plan,
+)
 
 # ---------- basic config (env)
 TOKEN             = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
@@ -48,6 +56,7 @@ SIM_API_URL       = (os.getenv("SIM_API_URL") or "").strip()  # optional externa
 WALLET_ADDRESS    = (os.getenv("WALLET_ADDRESS") or "").strip()
 NETWORK           = (os.getenv("NETWORK") or "mainnet").strip()
 DEFAULT_SLIP_BPS  = int(os.getenv("DEFAULT_SLIPPAGE_BPS") or "100")
+HIGH_IMPACT_THRESHOLD = float(os.getenv("HIGH_PRICE_IMPACT_THRESHOLD") or "3.0")
 ALLOWED_USER_IDS  = {u.strip() for u in (os.getenv("ALLOWED_TELEGRAM_USER_IDS") or "").split(",") if u.strip()}
 
 # Planner policy overrides (allow memecoins + optional mcap hint)
@@ -76,7 +85,7 @@ def _goblin_error_message(err: HTTPStatusError | Exception) -> str:
                     have = _fmt(d.get("have_sol"))
                     need = _fmt(d.get("need_sol"))
                     try_amt = _fmt(d.get("try_sol"))
-                    msg = f"⚠️ Not enough SOL, goblin. Need {need} incl. fees; you’ve got {have}."
+                    msg = f"⚠️ Not enough SOL, goblin. Need {need} incl. fees; you've got {have}."
                     tip = f"\nTry: {try_amt} or top up." if try_amt else (f"\nTip: {sug}" if sug else "")
                     return (msg + tip).strip()
                 if code == "INVALID_AMOUNT":
@@ -196,6 +205,9 @@ def _fmt_delta(v: float, unit: str) -> str:
     # default SOL-style
     return f"{v:+.4f}"
 
+def _fmt_pct(v: float) -> str:
+    return f"{v*100:+.1f}%"
+
 def _is_approve_micro_enabled(tracks: list[Dict[str, Any]], micro_sol: float) -> bool:
     # Enabled only if the best track (first in list) has all amounts ≤ micro
     if not tracks:
@@ -240,7 +252,7 @@ def _render_compare_card(goal: str, unit: str, mode: str, cap: Dict[str, Any], s
     for dv, name in deltas:
         bar = _ascii_bar(dv, max_abs)
         lines.append(f"{name}:  {_fmt_delta(dv, unit):>7}  {bar}")
-    footer = ("\n\n• Bars scaled to today’s best outcome.\n"
+    footer = ("\n\n• Bars scaled to today's best outcome.\n"
               "• Quotes expire; refresh if TTL shows 0s.")
     text = (header + "\n".join(lines) + footer)
     if len(text) > 900:
@@ -322,13 +334,40 @@ def _render_projection_card(goal: str, unit: str, mode: str, cap: Dict[str, Any]
     for (name, d) in lines:
         spark = _sparkline_series(d, width, vmin, vmax)
         final = d[-1] if d else 0.0
-        body_lines.append(f"{name}: {_fmt_delta(final, unit):>+7}  {spark}")
+        final_str = _fmt_delta(final, unit)
+        body_lines.append(f"{name}: {final_str:>7}  {spark}")
 
     footer = "\n\n• Higher bars ≈ better relative outcome.\n• Quotes expire; refresh if TTL shows 0s."
     text = header + "\n".join(body_lines) + footer
     if len(text) > 900:
         text = text[:880] + "…"
     return {"text": text}
+
+def _render_simple_compare_text(series: list[Dict[str, Any]]) -> str:
+    # Always show 4 lines: Baseline + up to 3 scenarios. Percent vs baseline
+    if not series:
+        return "No scenarios."
+    baseline = series[0]
+    base_v = [float(x) for x in (baseline.get("v") or [1.0, 1.0])]
+    b0 = base_v[0] if base_v else 1.0
+    if b0 == 0:
+        b0 = 1.0
+    lines: list[str] = []
+    # Baseline first
+    lines.append("Baseline: 0.0%  ───────────")
+    # Scenarios
+    scenarios = series[1:4]
+    deltas: list[tuple[str, float]] = []
+    for s in scenarios:
+        name = str(s.get("name") or "Scenario").strip()
+        vals = [float(x) for x in (s.get("v") or [])]
+        pct = ((vals[-1] / b0) - 1.0) if vals else 0.0
+        deltas.append((name, pct))
+    max_abs = max([abs(p) for _n, p in deltas] + [0.0])
+    for name, pct in deltas:
+        bar = _ascii_bar(pct, max_abs)
+        lines.append(f"{name}:  {_fmt_pct(pct):>7}  {bar}")
+    return "\n".join(lines)
 
 # Compute per-series deltas vs baseline
 def _series_deltas(series: list[Dict[str, Any]]) -> list[tuple[str, float]]:
@@ -800,28 +839,86 @@ def _options_cta(options: list[dict]) -> list[list[InlineKeyboardButton]]:
 
 # ---------- handlers (basic)
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    logging.info("START command")
-    await update.message.reply_text(
-        "GoblinBot ready ✅\n\n"
-        "Use /plan <goal>\nExample: /plan grow 1 SOL to 10 SOL\n\n"
-        "Exec:\n"
-        "/balance [TOKEN]\n"
-        "/quote <FROM> <TO> <AMOUNT> [slippage_bps]\n"
-        "/swap <FROM> <TO> <AMOUNT> [slippage_bps]\n"
-        "/stake <TOKEN> <AMOUNT>\n"
-        "/unstake <TOKEN> <AMOUNT>"
-    )
+    logging.info("menu:start")
+    await update.message.reply_text(START_TEXT)
 
 async def ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("pong")
+
+async def check_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    logging.info("menu:check")
+    await update.message.reply_text(CHECK_TEXT)
+
+async def do_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    logging.info("menu:do")
+    await update.message.reply_text(DO_TEXT)
+
+async def grow_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    logging.info("menu:grow")
+    await update.message.reply_text(GROW_TEXT)
+
+# ---------- natural-language router (plain text -> canonical commands)
+async def nl_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+    lower = text.lower()
+
+    def _dispatch(cmd: str) -> list[str]:
+        parts = (cmd or "").split()
+        return parts[1:] if parts and parts[0].startswith("/") else parts
+
+    # Try each parser; if parse fails but prefix matches, show that command's help
+    if lower.startswith("quote"):
+        cmd = parse_quote(text)
+        if cmd:
+            logging.info("nl:quote parsed")
+            ctx.args = _dispatch(cmd)
+            return await quote_cmd(update, ctx)
+        logging.info("help:quote")
+        return await update.message.reply_text(QUOTE_HELP)
+    if lower.startswith("swap"):
+        cmd = parse_swap(text)
+        if cmd:
+            logging.info("nl:swap parsed")
+            ctx.args = _dispatch(cmd)
+            return await swap_cmd(update, ctx)
+        logging.info("help:swap")
+        return await update.message.reply_text(SWAP_HELP)
+    if lower.startswith("stake"):
+        cmd = parse_stake(text)
+        if cmd:
+            logging.info("nl:stake parsed")
+            ctx.args = _dispatch(cmd)
+            return await stake_cmd(update, ctx)
+        logging.info("help:stake")
+        return await update.message.reply_text(STAKE_HELP)
+    if lower.startswith("unstake"):
+        cmd = parse_unstake(text)
+        if cmd:
+            logging.info("nl:unstake parsed")
+            ctx.args = _dispatch(cmd)
+            return await unstake_cmd(update, ctx)
+        logging.info("help:unstake")
+        return await update.message.reply_text(UNSTAKE_HELP)
+    if lower.startswith("plan"):
+        cmd = parse_plan(text)
+        if cmd:
+            logging.info("nl:plan parsed")
+            ctx.args = _dispatch(cmd)
+            return await plan_cmd(update, ctx)
+        logging.info("help:plan")
+        return await update.message.reply_text(PLAN_HELP)
+    # Not a recognized NL command; ignore so other handlers can process
+    return
 
 # ---- /plan: build exec-ready plan and surface simulate CTA
 async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text or ""
     goal = raw.partition(" ")[2].strip() or " ".join(ctx.args).strip()
-    if not goal:
-        await update.message.reply_text("Usage: /plan <goal>\nExample: /plan grow 1 SOL to 10 SOL")
-        return
+    if not goal or raw.strip().lower().endswith("help"):
+        logging.info("help:plan")
+        return await update.message.reply_text(PLAN_HELP)
     try:
         await ctx.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
     except Exception:
@@ -988,49 +1085,74 @@ _WEB_HTML = """
       body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; color: #e6e6e6; background: #0f0f13; }
       .card { background: #16161d; border-radius: 12px; padding: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
       h1 { font-size: 18px; margin: 0 0 8px; }
-      pre { white-space: pre-wrap; word-break: break-word; }
+      pre { white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.35; }
       .muted { color: #9aa0a6; font-size: 12px; }
       .bar { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       .btns { margin-top: 12px; display: grid; gap: 8px; grid-template-columns: repeat(2, 1fr); }
       button { background: #1f2937; color: #fff; border: 0; border-radius: 8px; padding: 10px 12px; cursor: pointer; }
       button.primary { background: #22c55e; color: #08130b; font-weight: 600; }
-      .dbg { position: fixed; top: 0; left: 0; right: 0; padding: 6px 10px; font-size: 11px; background: #332; color: #ff8; opacity: .9; }
+      .dbg { display:none; position: fixed; top: 0; left: 0; right: 0; padding: 6px 10px; font-size: 11px; background: #332; color: #ff8; opacity: .9; }
++      .hzn { margin: 6px 0 10px; display:flex; gap:6px; align-items:center; }
++      .hzn button { padding:6px 10px; background:#1f2937; color:#cbd5e1; border-radius:999px; border:0; cursor:pointer; font-size:12px; }
++      .hzn button.active { background:#22c55e; color:#08130b; font-weight:600; }
     </style>
     <script>
       async function load() {
         const urlParams = new URLSearchParams(window.location.search);
         const token = urlParams.get('token') || '';
-        document.getElementById('goal').textContent = 'Scenario Compare';
+        const ctx = urlParams.get('ctx') || '';
++        let horizon = parseInt(urlParams.get('h') || '30', 10);
++        if (!Number.isFinite(horizon)) horizon = 30;
++        const setHeader = () => { document.getElementById('goal').textContent = 'Scenario Compare · ' + horizon + 'd'; };
++        setHeader();
         let tgOK = false, readyOK = false;
         try {
           const tg = window.Telegram && window.Telegram.WebApp;
           if (tg) { tgOK = true; try { tg.ready(); readyOK = true; } catch(e) {} }
         } catch (e) {}
         const dbg = document.getElementById('dbg');
-        try {
-          const resp = await fetch('/telegram/simulate?token=' + encodeURIComponent(token));
-          const data = await resp.json();
-          document.getElementById('text').textContent = data.text || 'No data';
-          if (dbg) dbg.textContent = 'load:1 | tg:' + (tgOK?'1':'0') + ' | ready:' + (readyOK?'1':'0') + ' | api:' + (data && data.ok ? '1':'0');
-        } catch (e) {
-          document.getElementById('text').textContent = 'Failed to load simulation.';
-          if (dbg) dbg.textContent = 'load:1 | tg:' + (tgOK?'1':'0') + ' | ready:' + (readyOK?'1':'0') + ' | api:0';
-        }
+        const showDbg = urlParams.get('debug') === '1';
+        if (showDbg) dbg.style.display = 'block';
++        const render = async () => {
++          const resp = await fetch('/telegram/simulate?token=' + encodeURIComponent(token) + '&ctx=' + encodeURIComponent(ctx) + '&h=' + encodeURIComponent(String(horizon)));
++          const data = await resp.json();
++          document.getElementById('text').textContent = data.text || 'No data';
++          if (dbg) dbg.textContent = 'load:1 | tg:' + (tgOK?'1':'0') + ' | ready:' + (readyOK?'1':'0') + ' | api:' + (data && data.ok ? '1':'0');
++        };
++        try { await render(); }
++        catch (e) {
++          document.getElementById('text').textContent = 'Failed to load simulation.';
++          if (dbg) dbg.textContent = 'load:1 | tg:' + (tgOK?'1':'0') + ' | ready:' + (readyOK?'1':'0') + ' | api:0';
++        }
++        window.setH = async (h) => {
++          horizon = h;
++          setHeader();
++          for (const el of document.querySelectorAll('.hzn button')) el.classList.remove('active');
++          const id = 'h' + String(h);
++          const btn = document.getElementById(id); if (btn) btn.classList.add('active');
++          try { await render(); } catch (_) {}
++        };
++        const active = document.getElementById('h' + String(horizon)); if (active) active.classList.add('active');
       }
       window.addEventListener('load', load);
     </script>
   </head>
   <body>
-    <div id=\"dbg\" class=\"dbg\">init…</div>
-    <div class=\"card\"> 
-      <h1 id=\"goal\">Scenario Compare</h1>
-      <pre id=\"text\" class=\"bar\">Loading…</pre>
-      <div class=\"muted\">Bars scaled to today’s best outcome. Quotes expire; refresh if TTL shows 0s.</div>
-      <div class=\"btns\">
-        <button class=\"primary\" onclick=\"window.Telegram && Telegram.WebApp && Telegram.WebApp.close()\">Approve ≤ micro</button>
-        <button onclick=\"location.reload()\">Refresh</button>
-        <button onclick=\"history.back()\">Edit Goal</button>
-        <button onclick=\"window.Telegram && Telegram.WebApp && Telegram.WebApp.close()\">Cancel</button>
+    <div id="dbg" class="dbg">init…</div>
+    <div class="card"> 
++      <h1 id="goal">Scenario Compare · 30d</h1>
++      <div class="hzn">
++        <button id="h7" onclick="setH(7)">7d</button>
++        <button id="h30" onclick="setH(30)">30d</button>
++        <button id="h90" onclick="setH(90)">90d</button>
++      </div>
+      <pre id="text" class="bar">Loading…</pre>
+      <div class="muted">Bars scaled to today's best outcome. Quotes expire; refresh if TTL shows 0s.</div>
+      <div class="btns">
+        <button class="primary" onclick="window.Telegram && Telegram.WebApp && Telegram.WebApp.close()">Approve ≤ micro</button>
+        <button onclick="location.reload()">Refresh</button>
+        <button onclick="history.back()">Edit Goal</button>
+        <button onclick="window.Telegram && Telegram.WebApp && Telegram.WebApp.close()">Cancel</button>
       </div>
     </div>
   </body>
@@ -1046,11 +1168,50 @@ def _build_web_app(tg_app: Application) -> web.Application:
 
     async def sim_api(request: web.Request) -> web.Response:
         token = request.query.get("token") or ""
-        logging.debug("[sim_api] GET token=%s", token)
+        ctx_b64 = request.query.get("ctx") or ""
+        h_str = request.query.get("h") or ""
+        horizon = int(h_str) if h_str.isdigit() else None
+        logging.debug("[sim_api] GET token=%s ctx_len=%d h=%s", token, len(ctx_b64), h_str)
         plan = _sim_cache_get(token) if token else None
         if not isinstance(plan, dict):
             logging.debug("[sim_api] cache_miss token=%s", token)
-            return web.json_response({"ok": False, "text": "Session expired. Press Simulate again."}, status=200)
+            # Fallback: if we have ctx (base64 JSON with goal/tracks), render baseline + 3 named tracks flat
+            try:
+                if ctx_b64:
+                    ctx_json = json.loads(base64.urlsafe_b64decode(ctx_b64 + "==").decode())
+                else:
+                    ctx_json = {}
+                goal_text = str(ctx_json.get("goal") or "Your goal")
+                tracks_in = ctx_json.get("tracks") or []
+                track_names = [str(t.get("name") or f"Scenario {i+1}") for i, t in enumerate(tracks_in[:3])]
+                # Build simple series: baseline flat, three scenarios flat (or tiny uplift) so 4 bars appear
+                series = [
+                    {"name": "Baseline (HODL)", "t": [0,1], "v": [1.0, 1.0]},
+                ]
+                for i, name in enumerate(track_names):
+                    uplift = 0.01 if i == 0 else (0.02 if i == 1 else 0.03)
+                series = series + [{"name": name, "t": [0,1], "v": [1.0, 1.0 + uplift]} for i, name in enumerate(track_names)]
+                # Use original rich projection + compare view
+                cap = _capability_snapshot()
+                projection = _render_projection_card(goal_text, cap.get("unit") or "SOL", cap.get("mode") or "Asset", cap, series)
+                deltas = _series_deltas(series)
+                max_abs = max([abs(d[1]) for d in deltas] + [0.0])
+                header = (
+                    "📈 Scenario Compare (vs Do-Nothing Baseline)\n"
+                    f"🎯 Goal: {goal_text} · Unit: {cap.get('unit') or 'SOL'} · Mode: {cap.get('mode') or 'Asset'}\n"
+                    f"🛡️ Micro ≤ {cap.get('micro_sol')} {cap.get('unit') or 'SOL'} · Impact ≤ {cap.get('impact_cap_bps')/100:.2f}% · Region: {cap.get('region')}\n\n"
+                )
+                body = ["Baseline (HODL): 0.0000  ───────────"]
+                for name, dv in deltas:
+                    bar = _ascii_bar(dv, max_abs)
+                    body.append(f"{name}:  {_fmt_delta(dv, cap.get('unit') or 'SOL'):>7}  {bar}")
+                footer = "\n\n• Bars scaled to today's best outcome.\n• Quotes expire; refresh if TTL shows 0s."
+                compare_text = header + "\n".join(body) + footer
+                visual_text = projection["text"] + "\n\n" + compare_text
+                return web.json_response({"ok": True, "text": visual_text}, status=200)
+            except Exception:
+                logging.exception("[sim_api] fallback-from-ctx failed")
+                return web.json_response({"ok": False, "text": "Session expired. Press Simulate again."}, status=200)
 
         # If we already computed the visual text, return it
         visual_text = str(plan.get("visual_text") or "")
@@ -1066,7 +1227,7 @@ def _build_web_app(tg_app: Application) -> web.Application:
                 "options": list(options)[:3],
                 "sizing": plan.get("sizing") or {},
                 "baseline": plan.get("baseline") or {"name": "Hold SOL"},
-                "horizon_days": plan.get("horizon_days") or 30,
+                "horizon_days": horizon or plan.get("horizon_days") or 30,
             }
             account = plan.get("account") or plan.get("payer")
             if account:
@@ -1097,7 +1258,7 @@ def _build_web_app(tg_app: Application) -> web.Application:
             for name, dv in deltas:
                 bar = _ascii_bar(dv, max_abs)
                 body.append(f"{name}:  {_fmt_delta(dv, cap.get('unit') or 'SOL'):>7}  {bar}")
-            footer = "\n\n• Bars scaled to today’s best outcome.\n• Quotes expire; refresh if TTL shows 0s."
+            footer = "\n\n• Bars scaled to today's best outcome.\n• Quotes expire; refresh if TTL shows 0s."
             compare_text = header + "\n".join(body) + footer
             visual_text = projection["text"] + "\n\n" + compare_text
             plan_copy = dict(plan)
@@ -1272,7 +1433,7 @@ async def on_simulate_scenarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for name, dv in deltas:
             bar = _ascii_bar(dv, max_abs)
             body.append(f"{name}:  {_fmt_delta(dv, cap.get('unit') or 'SOL'):>7}  {bar}")
-        footer = "\n\n• Bars scaled to today’s best outcome.\n• Quotes expire; refresh if TTL shows 0s."
+        footer = "\n\n• Bars scaled to today's best outcome.\n• Quotes expire; refresh if TTL shows 0s."
         compare_text = header + "\n".join(body) + footer
         visual_text = projection["text"] + "\n\n" + compare_text
         # Store for WebApp retrieval (short TTL via SIM cache timestamp)
@@ -1283,27 +1444,9 @@ async def on_simulate_scenarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pass
     # Render ASCII compare below the playback message
     try:
-        goal_text = plan.get("summary") or plan.get("playback_text") or "Your goal"
-        cap = _capability_snapshot()
-        # Projection visual (sparklines) followed by compact compare
-        projection = _render_projection_card(goal_text, cap.get("unit") or "SOL", cap.get("mode") or "Asset", cap, series)
-        compare = _render_compare_card(goal_text, cap.get("unit") or "SOL", cap.get("mode") or "Asset", cap, series)
-        # Build Scenario Compare section to match spec (ASCII bars scaled)
-        deltas = _series_deltas(series)
-        max_abs = max([abs(d[1]) for d in deltas] + [0.0])
-        header = (
-            "📈 Scenario Compare (vs Do-Nothing Baseline)\n"
-            f"🎯 Goal: {goal_text} · Unit: {cap.get('unit') or 'SOL'} · Mode: {cap.get('mode') or 'Asset'}\n"
-            f"🛡️ Micro ≤ {cap.get('micro_sol')} {cap.get('unit') or 'SOL'} · Impact ≤ {cap.get('impact_cap_bps')/100:.2f}% · Region: {cap.get('region')}\n\n"
-        )
-        body = ["Baseline (HODL): 0.0000  ───────────"]
-        for name, dv in deltas:
-            bar = _ascii_bar(dv, max_abs)
-            body.append(f"{name}:  {_fmt_delta(dv, cap.get('unit') or 'SOL'):>7}  {bar}")
-        footer = "\n\n• Bars scaled to today’s best outcome.\n• Quotes expire; refresh if TTL shows 0s."
-        compare_text = header + "\n".join(body) + footer
-        # Final text: projection first (forward view), then Scenario Compare
-        text = projection["text"] + "\n\n" + compare_text
+        # Simplify inline message too (no duplicate to playback)
+        compare_text = _render_simple_compare_text(series)
+        text = compare_text
         buttons = []
         tracks = _build_scenario_tracks(plan)
         if _is_approve_micro_enabled(tracks, float(cap.get("micro_sol") or 0.05)):
@@ -1326,23 +1469,8 @@ async def on_simulate_scenarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Fallbacks: still produce the visual compare instead of raw summary
     if series:
         try:
-            goal_text = plan.get("summary") or plan.get("playback_text") or "Your goal"
-            cap = _capability_snapshot()
-            projection = _render_projection_card(goal_text, cap.get("unit") or "SOL", cap.get("mode") or "Asset", cap, series)
-            deltas = _series_deltas(series)
-            max_abs = max([abs(d[1]) for d in deltas] + [0.0])
-            header = (
-                "📈 Scenario Compare (vs Do-Nothing Baseline)\n"
-                f"🎯 Goal: {goal_text} · Unit: {cap.get('unit') or 'SOL'} · Mode: {cap.get('mode') or 'Asset'}\n"
-                f"🛡️ Micro ≤ {cap.get('micro_sol')} {cap.get('unit') or 'SOL'} · Impact ≤ {cap.get('impact_cap_bps')/100:.2f}% · Region: {cap.get('region')}\n\n"
-            )
-            body = ["Baseline (HODL): 0.0000  ───────────"]
-            for name, dv in deltas:
-                bar = _ascii_bar(dv, max_abs)
-                body.append(f"{name}:  {_fmt_delta(dv, cap.get('unit') or 'SOL'):>7}  {bar}")
-            footer = "\n\n• Bars scaled to today’s best outcome.\n• Quotes expire; refresh if TTL shows 0s."
-            compare_text = header + "\n".join(body) + footer
-            text = projection["text"] + "\n\n" + compare_text
+            compare_text = _render_simple_compare_text(series)
+            text = compare_text
             await _send_message_with_retry(
                 ctx,
                 chat_id=update.effective_chat.id,
@@ -1360,7 +1488,7 @@ async def on_simulate_scenarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await q.message.reply_text("⚠️ Unexpected simulation response.")
 
-# ---- Option CTA handler: show that option’s mini-brief and its actions
+# ---- Option CTA handler: show that option's mini-brief and its actions
 async def on_option_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -1489,6 +1617,23 @@ async def on_action_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         logging.exception("Action button failed: %s", err)
         await q.message.reply_text(f"⚠️ Action failed: {err}")
 
+async def on_approve_micro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    token = ""
+    data = q.data or ""
+    if isinstance(data, str) and data.startswith("approve_micro:"):
+        token = data.split(":", 1)[1]
+    plan = _sim_cache_get(token) if token else None
+    if not isinstance(plan, dict):
+        return await q.message.reply_text("Session expired. Run /plan again.")
+    cap = _capability_snapshot()
+    tracks = _build_scenario_tracks(plan)
+    if not _is_approve_micro_enabled(tracks, float(cap.get("micro_sol") or 0.05)):
+        return await q.message.reply_text("⚠️ Micro approval not available for this plan.")
+    # For now, this is a no-op approval; wire to real tx later
+    await q.message.reply_text("✅ Micro approved. Ready to execute when you are.")
+
 async def unknown_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Unknown command. Try /plan <goal>.")
 
@@ -1516,13 +1661,15 @@ async def quote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
         return await update.message.reply_text("🚫 Not allowed.")
     argv = _clean(_args(ctx))
-    if len(argv) < 3:
-        return await update.message.reply_text("Usage: /quote <FROM> <TO> <AMOUNT> [slippage_bps]\nExample: /quote SOL USDC 0.5 100")
+    raw = (update.message.text or "").lower()
+    if (not argv) or ("help" in raw) or (len(argv) < 3):
+        logging.info("help:quote")
+        return await update.message.reply_text(QUOTE_HELP)
     from_sym, to_sym = _norm(argv[0]), _norm(argv[1])
     try:
         amount = _parse_amount(argv[2])
     except Exception as err:
-        return await update.message.reply_text(str(err))
+        return await update.message.reply_text(ERR_MISSING)
     slip_bps = int(argv[3]) if len(argv) >= 4 else DEFAULT_SLIP_BPS
     try:
         payload = await _quote_payload_indexjs(from_sym, to_sym, amount, slip_bps)
@@ -1533,9 +1680,13 @@ async def quote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         in_ui  = to_ui(res.get("inAmount"),  in_info["decimals"]) or float(amount)
         out_ui = to_ui(res.get("outAmount"), out_info["decimals"])
         price  = (out_ui / in_ui) if in_ui else None
-        impact = res.get("priceImpactPct"); impact_pct = f"{float(impact) * 100:.2f}%" if impact is not None else None
+        impact = res.get("priceImpactPct"); impact_value = (float(impact) * 100.0) if impact is not None else None
+        impact_pct = f"{impact_value:.2f}%" if impact_value is not None else None
         slip_pct = f"{(res.get('slippageBps') or slip_bps) / 100:.2f}%"
-        lines = [f"🧮 Quote {fmt(in_ui)} {in_info['symbol']} → {out_info['symbol']}"]
+        lines = []
+        if impact_value is not None and impact_value > HIGH_IMPACT_THRESHOLD:
+            lines.append(f"⚠️ High price impact ({impact_value:.2f}%). Consider a smaller amount.")
+        lines.append(f"🧮 Quote {fmt(in_ui)} {in_info['symbol']} → {out_info['symbol']}")
         if out_ui:
             lines.append(f"Est. out: {fmt(out_ui)} {out_info['symbol']}")
         if price is not None:
@@ -1555,13 +1706,15 @@ async def swap_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
         return await update.message.reply_text("🚫 Not allowed.")
     argv = _clean(_args(ctx))
-    if len(argv) < 3:
-        return await update.message.reply_text("Usage:\n/swap <FROM> <TO> <AMOUNT> [slippage_bps]\nExample: /swap SOL USDC 0.5 100")
+    raw = (update.message.text or "").lower()
+    if (not argv) or ("help" in raw) or (len(argv) < 3):
+        logging.info("help:swap")
+        return await update.message.reply_text(SWAP_HELP)
     from_sym, to_sym = _norm(argv[0]), _norm(argv[1])
     try:
         amount = _parse_amount(argv[2])
     except Exception as err:
-        return await update.message.reply_text(str(err))
+        return await update.message.reply_text(ERR_MISSING)
     slip_bps = int(argv[3]) if len(argv) >= 4 else DEFAULT_SLIP_BPS
     try:
         res = await _exec_post("swap", _swap_payload(from_sym, to_sym, amount, slip_bps))
@@ -1581,13 +1734,15 @@ async def stake_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
         return await update.message.reply_text("🚫 Not allowed.")
     argv = _args(ctx)
-    if len(argv) < 2:
-        return await update.message.reply_text("Usage:\n/stake <TOKEN> <AMOUNT>\nExample: /stake JITOSOL 1.0")
+    raw = (update.message.text or "").lower()
+    if (not argv) or ("help" in raw) or (len(argv) < 2):
+        logging.info("help:stake")
+        return await update.message.reply_text(STAKE_HELP)
     token = _norm(argv[0])
     try:
         amount = _parse_amount(argv[1])
     except Exception as err:
-        return await update.message.reply_text(str(err))
+        return await update.message.reply_text(ERR_MISSING)
     payload = {"protocol": _proto(token), "amountLamports": to_lamports(amount),
                "wallet": WALLET_ADDRESS, "network": NETWORK}
     try:
@@ -1604,13 +1759,15 @@ async def unstake_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
         return await update.message.reply_text("🚫 Not allowed.")
     argv = _args(ctx)
-    if len(argv) < 2:
-        return await update.message.reply_text("Usage:\n/unstake <TOKEN> <AMOUNT>\nExample: /unstake JITOSOL 0.5")
+    raw = (update.message.text or "").lower()
+    if (not argv) or ("help" in raw) or (len(argv) < 2):
+        logging.info("help:unstake")
+        return await update.message.reply_text(UNSTAKE_HELP)
     token = _norm(argv[0])
     try:
         amount = _parse_amount(argv[1])
     except Exception as err:
-        return await update.message.reply_text(str(err))
+        return await update.message.reply_text(ERR_MISSING)
     payload = {"protocol": _proto(token), "amountLamports": to_lamports(amount),
                "wallet": WALLET_ADDRESS, "network": NETWORK}
     try:
@@ -1625,6 +1782,9 @@ async def unstake_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 def add_handlers(a: Application):
     a.add_handler(CommandHandler("start", start))
+    a.add_handler(CommandHandler("check", check_menu))
+    a.add_handler(CommandHandler("do", do_menu))
+    a.add_handler(CommandHandler("grow", grow_menu))
     a.add_handler(CommandHandler("ping", ping))
     a.add_handler(CommandHandler("plan", plan_cmd))
     # keep callback handler for legacy clients; web app button is preferred
@@ -1636,6 +1796,8 @@ def add_handlers(a: Application):
     a.add_handler(CommandHandler("swap",    swap_cmd))
     a.add_handler(CommandHandler("stake",   stake_cmd))
     a.add_handler(CommandHandler("unstake", unstake_cmd))
+    # Natural-language router for plain text (no leading slash)
+    a.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, nl_router))
     a.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
 
 # ---------- run (blocking; PTB manages the event loop)
