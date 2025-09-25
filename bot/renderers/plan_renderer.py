@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from bot.design_system import EMOJI, pick_strategy_emoji
+from bot.design_system import EMOJI
 
 
 def _shorten_words(text: str, max_words: int = 12) -> str:
@@ -73,39 +73,38 @@ def render_plan_simple(goal: str, playback: Dict[str, Any]) -> str:
     for opt in options[:3]:
         name = str(opt.get("name") or "Strategy").strip()[:40].rstrip()
         why = _expand_abbrev(str(opt.get("strategy") or opt.get("rationale") or opt.get("bucket") or "").strip())
-        emoji = pick_strategy_emoji(str(opt.get("strategy") or name))
-        lines.append(_clamp_line(f"- {emoji} {name} — {_shorten_words(why, 12)}"))
+        lines.append(_clamp_line(f"- {name} — {_summarize(_shorten_words(why, 12), 160)}"))
     lines.append("")
 
     # Risks (map or default)
     lines.append(f"{EMOJI['header_risks']} Risks")
     risks = playback.get("risks") or []
     if not risks:
-        lines.append(_clamp_line(f"- {EMOJI['risk_market']} Market volatility"))
-        lines.append(_clamp_line(f"- {EMOJI['risk_protocol']} Protocol risk (staking/contracts)"))
-        lines.append(_clamp_line(f"- {EMOJI['risk_stablecoin']} Stablecoin depeg (USDC/USDT)"))
-        lines.append(_clamp_line(f"- {EMOJI['risk_liquidity']} Slippage or price impact if liquidity is low"))
+        lines.append(_clamp_line(f"- Market volatility"))
+        lines.append(_clamp_line(f"- Protocol risk (staking/contracts)"))
+        lines.append(_clamp_line(f"- Stablecoin depeg (USDC/USDT)"))
+        lines.append(_clamp_line(f"- Slippage or price impact if liquidity is low"))
     else:
         # Best-effort mapping; cap at 4
         mapped: List[str] = []
         for r in risks:
             s = str(r).lower()
-            if any(k in s for k in ("market", "price", "volat")) and f"- {EMOJI['risk_market']}" not in "\n".join(mapped):
-                mapped.append(_clamp_line(f"- {EMOJI['risk_market']} {str(r)}"))
+            if any(k in s for k in ("market", "price", "volat")) and "- Market" not in "\n".join(mapped):
+                mapped.append(_clamp_line(f"- {str(r)}"))
             elif any(k in s for k in ("protocol", "contract", "smart")):
-                mapped.append(_clamp_line(f"- {EMOJI['risk_protocol']} {str(r)}"))
+                mapped.append(_clamp_line(f"- {str(r)}"))
             elif any(k in s for k in ("usdc", "stable", "counterparty")):
-                mapped.append(_clamp_line(f"- {EMOJI['risk_stablecoin']} {str(r)}"))
+                mapped.append(_clamp_line(f"- {str(r)}"))
             elif any(k in s for k in ("liquidity", "impact", "slippage")):
-                mapped.append(_clamp_line(f"- {EMOJI['risk_liquidity']} {str(r)}"))
+                mapped.append(_clamp_line(f"- {str(r)}"))
             if len(mapped) >= 4:
                 break
         if not mapped:
             mapped = [
-                _clamp_line(f"- {EMOJI['risk_market']} Market volatility"),
-                _clamp_line(f"- {EMOJI['risk_protocol']} Protocol risk (staking/contracts)"),
-                _clamp_line(f"- {EMOJI['risk_stablecoin']} Stablecoin depeg (USDC/USDT)"),
-                _clamp_line(f"- {EMOJI['risk_liquidity']} Slippage or price impact if liquidity is low"),
+                _clamp_line(f"- Market volatility"),
+                _clamp_line(f"- Protocol risk (staking/contracts)"),
+                _clamp_line(f"- Stablecoin depeg (USDC/USDT)"),
+                _clamp_line(f"- Slippage or price impact if liquidity is low"),
             ]
         lines.extend(mapped[:4])
 
