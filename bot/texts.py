@@ -17,8 +17,12 @@ DO_TEXT = """🛠️ Do Options:
 """
 
 GROW_MENU_TEXT = """🌱 Grow Options:
-- 🧠 /goal     — set a goal → plan → compare → simulate
-- 💹 /earn     — quick path to staking
+- 🧠 /plan     — set a goal and get a plan
+  Takes ~7 minutes ⏳😅
+
+- 📈 /scale    — grow 1 SOL to 10 SOL
+
+- 💹 /earn     — earn yield on your SOL this month
 """
 
 QUOTE_HELP = """📊 Quote time!

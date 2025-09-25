@@ -856,11 +856,7 @@ async def do_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def grow_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logging.info("menu:grow")
-    text = (update.message.text or "").lower()
-    if " menu" in text or text.strip() == "/grow menu":
-        return await update.message.reply_text(GROW_TEXT)
-    # Default: show Level-2 card (screenshot style)
-    return await update.message.reply_text(GROW_TEXT)
+    return await update.message.reply_text(GROW_MENU_TEXT)
 
 async def goal_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text or ""
