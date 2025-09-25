@@ -994,6 +994,12 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if isinstance(chat_id, int):
         _LAST_PLAN[chat_id] = exec_plan
 
+    # Ensure plan is available for simulate callbacks/webapp
+    try:
+        _sim_cache_put(token, exec_plan)
+    except Exception:
+        pass
+
     # Warm Jupiter list in background (faster first quote)
     asyncio.create_task(_jup_tokenlist())
 
@@ -1031,8 +1037,7 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    # Then send full playback with simulate (kept for backward-compat / rich context)
-    await send_playback_with_simulate(update, ctx, exec_plan)
+    # Skip legacy verbose playback; concise block only
 
     # Clean up stub
     try:
