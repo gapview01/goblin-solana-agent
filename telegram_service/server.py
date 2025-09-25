@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 
 from planner.exec_ready_planner import build_exec_ready_plan
 from bot.texts import (
-    START_TEXT, CHECK_TEXT, DO_TEXT, GROW_MENU_TEXT,
+    START_TEXT, CHECK_TEXT, DO_TEXT, GROW_MENU_TEXT, GROW_TEXT,
     QUOTE_HELP, SWAP_HELP, STAKE_HELP, UNSTAKE_HELP, PLAN_HELP, GOAL_HELP, EARN_HELP,
     ERR_TOO_MUCH, ERR_UNKNOWN_TOKEN, ERR_MISSING,
 )
