@@ -57,7 +57,7 @@ Examples:
 - ✍️ Custom — type: /unstake TOKEN AMOUNT
 """
 
-PLAN_HELP = """🧠 Set a goal and get a plan.
+PLAN_HELP = """🧠 Set a goal & get a plan.
 Try:
 - 🧠 /plan grow 1 SOL to 10 SOL
 - 🧠 /plan earn yield on 2 SOL this month
