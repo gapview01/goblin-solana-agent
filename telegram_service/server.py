@@ -1027,12 +1027,7 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Skip legacy verbose playback; concise block only
 
-    # Clean up stub
-    try:
-        if stub_msg and stub_msg.message_id:
-            await ctx.bot.delete_message(chat_id=stub_msg.chat_id, message_id=stub_msg.message_id)
-    except Exception:
-        pass
+    # Keep the stub; do not delete to avoid losing user context if anything fails
 
     if SHOW_PLAN_JSON:
         code = f"<pre>{html.escape(plan_text)}</pre>"
