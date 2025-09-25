@@ -29,12 +29,29 @@ def _clamp_line(text: str, max_chars: int = 80) -> str:
     return cut + "…"
 
 
+_ABBREV_MAP = {
+    "CSA": "Conservative · Standard · Aggressive",
+    "LSD": "liquid staking",
+    "APR": "annual percentage rate",
+    "TVL": "total value locked",
+    "DeFi": "decentralized finance",
+    "defi": "decentralized finance",
+}
+
+
+def _expand_abbrev(text: str) -> str:
+    out = text or ""
+    for k, v in _ABBREV_MAP.items():
+        out = out.replace(k, v)
+    return out
+
+
 def render_plan_simple(goal: str, playback: Dict[str, Any]) -> str:
     options = playback.get("options") or []
     num_strats = min(3, len(options))
     sizing = playback.get("sizing") or {}
     size_sol = sizing.get("final_sol") or sizing.get("desired_sol") or 0.0
-    frame = playback.get("frame") or "CSA"
+    frame = _expand_abbrev(str(playback.get("frame") or "Conservative · Standard · Aggressive"))
 
     # Header: Goal
     lines: List[str] = []
@@ -48,14 +65,14 @@ def render_plan_simple(goal: str, playback: Dict[str, Any]) -> str:
     lines.append(f"{EMOJI['header_summary']} Plan Summary")
     lines.append(_clamp_line(f"- {EMOJI['bullet_count']} {num_strats or len(options)} strategies generated"))
     lines.append(_clamp_line(f"- {EMOJI['bullet_size']} Using ~{_fmt_size(size_sol)} SOL (after buffer)"))
-    lines.append(_clamp_line(f"- {EMOJI['bullet_frame']} Frame: {frame}"))
+    lines.append(_clamp_line(f"- {EMOJI['bullet_frame']} Frame: {_expand_abbrev(frame)}"))
     lines.append("")
 
     # Strategies (up to 3)
     lines.append(f"{EMOJI['header_strats']} Strategies")
     for opt in options[:3]:
         name = str(opt.get("name") or "Strategy").strip()[:40].rstrip()
-        why = str(opt.get("strategy") or opt.get("rationale") or opt.get("bucket") or "").strip()
+        why = _expand_abbrev(str(opt.get("strategy") or opt.get("rationale") or opt.get("bucket") or "").strip())
         emoji = pick_strategy_emoji(str(opt.get("strategy") or name))
         lines.append(_clamp_line(f"- {emoji} {name} — {_shorten_words(why, 12)}"))
     lines.append("")
