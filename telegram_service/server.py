@@ -31,7 +31,7 @@ from bot.texts import (
     START_TEXT, CHECK_TEXT, DO_TEXT, GROW_MENU_TEXT, GROW_TEXT,
     QUOTE_HELP, SWAP_HELP, STAKE_HELP, UNSTAKE_HELP, PLAN_HELP, GOAL_HELP, EARN_HELP,
     ERR_TOO_MUCH, ERR_UNKNOWN_TOKEN, ERR_MISSING,
-    render_simple_plan,
+    render_simple_plan, NO_PLAN_FOUND,
 )
 from bot.handlers.compare import show_compare as _show_compare_card
 from bot.nlp import (
@@ -1007,31 +1007,12 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         logging.info("plan:render_simple")
         simple = render_simple_plan(exec_plan)
-        # Inline keyboard with a single Simulate button
-        if SIM_WEBAPP_URL:
-            try:
-                top_opts = []
-                for opt in list(exec_plan.get("options") or [])[:3]:
-                    top_opts.append({"name": str(opt.get("name") or "Track")})
-                ctx_obj = {
-                    "goal": exec_plan.get("summary") or exec_plan.get("playback_text") or "Your goal",
-                    "unit": "SOL",
-                    "mode": "Asset",
-                    "tracks": top_opts,
-                }
-                ctx_b64 = base64.urlsafe_b64encode(json.dumps(ctx_obj).encode()).decode()
-            except Exception:
-                ctx_b64 = ""
-            web_url = f"{SIM_WEBAPP_URL}?token={token}&ctx={ctx_b64}"
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Simulate Scenarios", web_app=WebAppInfo(url=web_url))]])
-        else:
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Simulate Scenarios", callback_data=f"SIM:{token}")]])
         await _send_message_with_retry(
             ctx,
             chat_id=update.effective_chat.id,
             text=simple,
             parse_mode=None,
-            reply_markup=keyboard,
+            reply_markup=None,
             reply_to_message_id=update.message.message_id if update.message else None,
         )
     except Exception:
@@ -1831,6 +1812,71 @@ async def stake_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except HTTPStatusError as e_http:
         await update.message.reply_text(_goblin_error_message(e_http))
 
+async def simulate_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    logging.info("simulate:render")
+    data = ctx.user_data.get("last_plan") if hasattr(ctx, "user_data") else None
+    if not isinstance(data, dict):
+        return await update.message.reply_text(NO_PLAN_FOUND)
+    payload = data.get("payload") or data.get("plan") or {}
+    if not isinstance(payload, dict):
+        return await update.message.reply_text(NO_PLAN_FOUND)
+    token = payload.get("token") or uuid.uuid4().hex
+    payload["token"] = token
+    _sim_cache_put(token, payload)
+    # Reuse existing simulate flow by faking a callback
+    # Send an inline compare card directly
+    try:
+        # Build a minimal fake series rendering path by calling the existing simulate handler logic
+        # Trigger via internal call path: we cannot fabricate a CallbackQuery easily, so invoke _exec_post and then render
+        q_update = update  # placeholder for types
+        class _Q:  # tiny shim to reuse below logic
+            def __init__(self, message):
+                self.data = f"SIM:{token}"
+                self.message = message
+            async def answer(self, text=None):
+                return None
+        q = _Q(update.message)
+        # Manually call the simulate routine core by composing a minimal payload
+        options = payload.get("options") or []
+        req = {
+            "frame": payload.get("frame") or "CSA",
+            "options": list(options)[:3],
+            "sizing": payload.get("sizing") or {},
+            "baseline": payload.get("baseline") or {"name": "Hold SOL"},
+            "horizon_days": payload.get("horizon_days") or 30,
+        }
+        resp = await _exec_post("simulate", req)
+        # Emulate rendering path from on_simulate_scenarios (inline card)
+        raw_series = resp.get("series")
+        series = [s for s in raw_series if isinstance(s, dict)] if isinstance(raw_series, list) else []
+        goal_text = payload.get("summary") or payload.get("playback_text") or payload.get("goal") or "Your goal"
+        cap = _capability_snapshot()
+        deltas = _series_deltas(series)
+        max_abs = max([abs(d[1]) for d in deltas] + [0.0])
+        header = (
+            "📈 Scenario Compare (vs Do-Nothing Baseline)\n"
+            f"🎯 Goal: {goal_text} · Unit: {cap.get('unit') or 'SOL'} · Mode: {cap.get('mode') or 'Asset'}\n"
+            f"🛡️ Micro ≤ {cap.get('micro_sol')} {cap.get('unit') or 'SOL'} · Impact ≤ {cap.get('impact_cap_bps')/100:.2f}% · Region: {cap.get('region')}\n\n"
+        )
+        body = ["Baseline (HODL): 0.0000  ───────────"]
+        for name, dv in deltas:
+            bar = _ascii_bar(dv, max_abs)
+            body.append(f"{name}:  {_fmt_delta(dv, cap.get('unit') or 'SOL'):>7}  {bar}")
+        footer = "\n\n• Bars scaled to today's best outcome.\n• Quotes expire; refresh if TTL shows 0s."
+        compare_text = header + "\n".join(body) + footer
+        buttons = []
+        tracks = _build_scenario_tracks(payload)
+        if _is_approve_micro_enabled(tracks, float(cap.get("micro_sol") or 0.05)):
+            buttons.append([InlineKeyboardButton("✅ Approve ≤ micro", callback_data=f"approve_micro:{token}")])
+        buttons.append([InlineKeyboardButton("📝 Edit Goal", callback_data="edit_goal")])
+        buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh_compare:{token}")])
+        buttons.append([InlineKeyboardButton("🛑 Cancel", callback_data="cancel")])
+        keyboard = InlineKeyboardMarkup(buttons)
+        await update.message.reply_text(compare_text, reply_markup=keyboard)
+        return
+    except Exception:
+        logging.exception("simulate:render failed")
+        return await update.message.reply_text("⚠️ Couldn’t load quotes. Tap Refresh.")
 async def unstake_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
         return await update.message.reply_text("🚫 Not allowed.")
@@ -1865,6 +1911,7 @@ def add_handlers(a: Application):
     a.add_handler(CommandHandler("earn", earn_cmd))
     a.add_handler(CommandHandler("ping", ping))
     a.add_handler(CommandHandler("plan", plan_cmd))
+    a.add_handler(CommandHandler(["simulate", "sim"], simulate_cmd))
     # keep callback handler for legacy clients; web app button is preferred
     a.add_handler(CallbackQueryHandler(on_simulate_scenarios, pattern=r"^SIM:"))
     a.add_handler(CallbackQueryHandler(on_option_button, pattern=r"^opt:"))  # option CTAs

@@ -185,8 +185,15 @@ def render_simple_plan(plan: Dict[str, Any]) -> str:
         lines.append("⚠️ Risks")
         for r in risks[:4]:
             lines.append(f"• {str(r)}")
+    lines.append("")
+    lines.append("▶️ /simulate  — simulate scenarios")
 
     return "\n".join(lines)
+
+
+# Hints/Errors for simulate command
+SIMULATE_HINT = "▶️ /simulate  — simulate scenarios"
+NO_PLAN_FOUND = "🤔 No recent plan found. Try /plan first."
 
 # -------- Layer-3 prompts for new Grow commands --------
 GOAL_HELP = """🧠 Set a goal.
