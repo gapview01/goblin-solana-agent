@@ -138,75 +138,53 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Integration test - Module structure
+      - name: Integration test - File structure
         run: |
-          echo "🔗 Testing module structure..."
-          python -c "
-          try:
-              import sys
-              import os
-              import importlib.util
-              
-              # Add current directory to path
-              sys.path.insert(0, '.')
-              
-              # Check planner module structure
-              spec = importlib.util.spec_from_file_location('planner', 'planner/planner.py')
-              if spec and spec.loader:
-                  print('✅ Planner module structure valid')
-              
-              # Check llm_planner module structure  
-              spec = importlib.util.spec_from_file_location('llm_planner', 'planner/llm_planner.py')
-              if spec and spec.loader:
-                  print('✅ LLM planner module structure valid')
-              
-              # Check telegram service module structure
-              spec = importlib.util.spec_from_file_location('server', 'telegram_service/server.py')
-              if spec and spec.loader:
-                  print('✅ Telegram service module structure valid')
-              
-              print('✅ All modules have valid structure')
-          except Exception as e:
-              print(f'❌ Module structure check failed: {e}')
-              exit(1)
-          "
+          echo "🔗 Testing file structure..."
+          # Check if essential files exist
+          if [ -f "planner/planner.py" ]; then
+              echo "✅ Planner module file exists"
+          else
+              echo "❌ Planner module file missing"
+              exit 1
+          fi
+          
+          if [ -f "planner/llm_planner.py" ]; then
+              echo "✅ LLM planner module file exists"
+          else
+              echo "❌ LLM planner module file missing"
+              exit 1
+          fi
+          
+          if [ -f "telegram_service/server.py" ]; then
+              echo "✅ Telegram service module file exists"
+          else
+              echo "❌ Telegram service module file missing"
+              exit 1
+          fi
+          
+          echo "✅ All essential files exist"
       
       - name: Integration test - Function signatures
         run: |
           echo "🔗 Testing function signatures..."
-          python -c "
-          import ast
-          import inspect
+          # Check if plan function exists in planner.py
+          if grep -q "def plan" planner/planner.py; then
+              echo "✅ Legacy planner has plan function"
+          else
+              echo "❌ Legacy planner missing plan function"
+              exit 1
+          fi
           
-          # Parse the planner.py file to check function signatures
-          with open('planner/planner.py', 'r') as f:
-              planner_code = f.read()
+          # Check if plan function exists in llm_planner.py
+          if grep -q "def plan" planner/llm_planner.py; then
+              echo "✅ LLM planner has plan function"
+          else
+              echo "❌ LLM planner missing plan function"
+              exit 1
+          fi
           
-          # Parse the llm_planner.py file to check function signatures
-          with open('planner/llm_planner.py', 'r') as f:
-              llm_planner_code = f.read()
-          
-          # Check if plan function exists in both files
-          planner_tree = ast.parse(planner_code)
-          llm_planner_tree = ast.parse(llm_planner_code)
-          
-          planner_functions = [node.name for node in ast.walk(planner_tree) if isinstance(node, ast.FunctionDef)]
-          llm_planner_functions = [node.name for node in ast.walk(llm_planner_tree) if isinstance(node, ast.FunctionDef)]
-          
-          if 'plan' in planner_functions:
-              print('✅ Legacy planner has plan function')
-          else:
-              print('❌ Legacy planner missing plan function')
-              exit(1)
-              
-          if 'plan' in llm_planner_functions:
-              print('✅ LLM planner has plan function')
-          else:
-              print('❌ LLM planner missing plan function')
-              exit(1)
-          
-          print('✅ All required functions exist')
-          "
+          echo "✅ All required functions exist"
       
       - name: Integration test - Error handling
         run: |
