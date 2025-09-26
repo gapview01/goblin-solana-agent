@@ -4,9 +4,15 @@ on:
   pull_request:
   push:
 
+# Cancel older runs on the same branch/PR so only the latest runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -22,8 +28,10 @@ jobs:
         if: ${{ hashFiles('tests/**/*.py') != '' }}
         run: |
           pytest -q
+
   scaffold-checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Ensure scaffold exists
