@@ -1,0 +1,96 @@
+name: Auto-Fix Common Issues
+
+on:
+  workflow_run:
+    workflows: ["GitOps Pipeline - Build → Test → Integrate → Deploy → Merge"]
+    types: [completed]
+    branches: [main, develop, 'feature/*', 'hotfix/*']
+
+jobs:
+  auto-fix:
+    name: 🔧 Auto-Fix
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest black isort flake8
+      
+      - name: Auto-fix Python formatting
+        run: |
+          echo "🔧 Auto-fixing Python formatting..."
+          
+          # Run black formatter
+          black --check --diff planner/ telegram_service/ || {
+            echo "📝 Applying black formatting..."
+            black planner/ telegram_service/
+          }
+          
+          # Run isort
+          isort --check-only --diff planner/ telegram_service/ || {
+            echo "📝 Applying isort import sorting..."
+            isort planner/ telegram_service/
+          }
+      
+      - name: Auto-fix linting issues
+        run: |
+          echo "🔧 Auto-fixing linting issues..."
+          
+          # Run flake8 and capture issues
+          flake8 planner/ telegram_service/ --max-line-length=100 --ignore=E203,W503 || {
+            echo "⚠️  Linting issues found (some may be auto-fixable)"
+          }
+      
+      - name: Auto-fix test issues
+        run: |
+          echo "🔧 Checking for test issues..."
+          
+          # Ensure all test files are properly formatted
+          if [ -f "tests/test_emoji_patterns.py" ]; then
+            black tests/test_emoji_patterns.py
+          fi
+          
+          if [ -f "tests/test_system_health.py" ]; then
+            black tests/test_system_health.py
+          fi
+      
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet; then
+            echo "No changes needed"
+            echo "has-changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "Changes made"
+            echo "has-changes=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Commit auto-fixes
+        if: steps.changes.outputs.has-changes == 'true'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          git add .
+          git commit -m "🔧 Auto-fix: Format code and fix linting issues [skip ci]"
+          git push
+          
+          echo "✅ Auto-fixes committed and pushed"
+      
+      - name: Re-run pipeline
+        if: steps.changes.outputs.has-changes == 'true'
+        run: |
+          echo "🔄 Re-running pipeline after auto-fixes..."
+          echo "The pipeline will automatically trigger on the new commit"

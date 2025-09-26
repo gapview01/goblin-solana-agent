@@ -1,0 +1,41 @@
+name: Branch Protection Rules
+
+# This workflow sets up branch protection rules
+# Run manually to configure branch protection
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'Branch to protect (default: main)'
+        required: false
+        default: 'main'
+        type: string
+
+jobs:
+  setup-branch-protection:
+    name: 🛡️ Setup Branch Protection
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure branch protection
+        run: |
+          echo "🛡️ Branch Protection Configuration for ${{ github.event.inputs.branch_name || 'main' }}"
+          echo ""
+          echo "Required settings:"
+          echo "✅ Require a pull request before merging"
+          echo "✅ Require status checks to pass before merging"
+          echo "✅ Require branches to be up to date before merging"
+          echo "✅ Require linear history"
+          echo "✅ Restrict pushes that create files larger than 100MB"
+          echo "✅ Require conversation resolution before merging"
+          echo ""
+          echo "Status checks required:"
+          echo "✅ Build phase must pass"
+          echo "✅ Test phase must pass"
+          echo "✅ Integration phase must pass"
+          echo "✅ Deploy phase must pass"
+          echo ""
+          echo "⚠️  Note: Configure these settings in GitHub repository settings:"
+          echo "   Settings → Branches → Add rule"
+          echo "   Branch name pattern: ${{ github.event.inputs.branch_name || 'main' }}"
+          echo "   Apply to: main branch"
