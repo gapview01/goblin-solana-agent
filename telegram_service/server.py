@@ -46,6 +46,7 @@ WEBHOOK_SECRET    = (os.getenv("WEBHOOK_SECRET") or "hook").strip()
 PORT              = int(os.getenv("PORT") or 8080)
 LOG_LEVEL         = (os.getenv("LOG_LEVEL") or "INFO").upper()
 SHOW_PLAN_JSON    = (os.getenv("SHOW_PLAN_JSON") or "0").lower() in ("1", "true", "yes")
+USE_POLLING       = (os.getenv("USE_POLLING") or "0").lower() in ("1", "true", "yes")
 
 # Planner selection: "llm" (default) prefers planner/llm_planner.py; set to "legacy" for planner/planner.py
 PLANNER_IMPL   = (os.getenv("PLANNER_IMPL") or "llm").lower()
@@ -1935,14 +1936,18 @@ def add_handlers(a: Application):
 def main():
     add_handlers(app)
     logging.info("Planner wired? %s from %s", llm_plan is not None, getattr(llm_plan, "__module__", None))
-    # Always run a single aiohttp app that serves both webhook + webapp routes
-    web_app = _build_web_app(app)
-    # Configure Telegram webhook URL on startup hook; here log intent
-    if WEBHOOK_BASE_URL:
-        logging.info("Serving at 0.0.0.0:%s and expecting webhook at %s/webhook/%s", PORT, WEBHOOK_BASE_URL, WEBHOOK_SECRET)
+    if USE_POLLING:
+        logging.info("Starting in polling mode (USE_POLLING=1)")
+        # Polling mode bypasses webhook delivery; good for quick recovery and tests
+        app.run_polling()
     else:
-        logging.warning("WEBHOOK_BASE_URL not set; Telegram webhook cannot be reconciled")
-    web.run_app(web_app, host="0.0.0.0", port=PORT)
+        # Webhook + mini webapp
+        web_app = _build_web_app(app)
+        if WEBHOOK_BASE_URL:
+            logging.info("Serving at 0.0.0.0:%s and expecting webhook at %s/webhook/%s", PORT, WEBHOOK_BASE_URL, WEBHOOK_SECRET)
+        else:
+            logging.warning("WEBHOOK_BASE_URL not set; Telegram webhook cannot be reconciled")
+        web.run_app(web_app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
     main()
