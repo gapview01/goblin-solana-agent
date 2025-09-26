@@ -1019,14 +1019,35 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         logging.info("plan:render_simple")
         simple = render_plan_simple(goal, exec_plan)
-        await _send_message_with_retry(
-            ctx,
-            chat_id=update.effective_chat.id,
-            text=simple,
-            parse_mode=None,
-            reply_markup=None,
-            reply_to_message_id=update.message.message_id if update.message else None,
-        )
+        # Prefer editing the stub so the summary replaces "Planning…" in place
+        if stub_msg and getattr(stub_msg, "message_id", None):
+            try:
+                await ctx.bot.edit_message_text(
+                    chat_id=stub_msg.chat_id,
+                    message_id=stub_msg.message_id,
+                    text=simple,
+                    parse_mode=None,
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                # Fallback: send as a new message without reply threading
+                await _send_message_with_retry(
+                    ctx,
+                    chat_id=update.effective_chat.id,
+                    text=simple,
+                    parse_mode=None,
+                    reply_markup=None,
+                    reply_to_message_id=None,
+                )
+        else:
+            await _send_message_with_retry(
+                ctx,
+                chat_id=update.effective_chat.id,
+                text=simple,
+                parse_mode=None,
+                reply_markup=None,
+                reply_to_message_id=None,
+            )
     except Exception:
         pass
 
