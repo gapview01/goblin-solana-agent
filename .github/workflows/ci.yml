@@ -7,7 +7,7 @@ on:
 # Cancel older runs on the same branch/PR so only the latest runs.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   test:
