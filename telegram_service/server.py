@@ -400,7 +400,7 @@ def _actions_to_buttons(actions: list[dict]) -> list[list[InlineKeyboardButton]]
                           callback_data=f"run:quote:{ins}:{outs}:{amt}:{DEFAULT_SLIP_BPS}")])
         elif verb == "swap":
             ins, outs, amt = p.get("in","?"), p.get("out","?"), p.get("amount","0.10")
-            rows.append([InlineKeyboardButton(f"🔁 Swap {ins}→{outs} {amt}",
+            rows.append([InlineKeyboardButton(f"🔄 Swap {ins}→{outs} {amt}",
                           callback_data=f"run:swap:{ins}:{outs}:{amt}:{DEFAULT_SLIP_BPS}")])
         elif verb == "stake":
             proto, amt = (p.get("protocol") or "").lower(), p.get("amount","0.10")
@@ -485,23 +485,23 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Build briefing text
     brief = []
     goal_rewrite = understanding.get("goal_rewrite") or goal
-    brief.append(f"<b>Goal:</b> {html.escape(goal_rewrite)}")
+    brief.append(f"🧠 <b>Goal:</b> {html.escape(goal_rewrite)}")
     if summary:
-        brief.append(f"<b>Summary:</b> {html.escape(summary)}")
+        brief.append(f"📋 <b>Summary:</b> {html.escape(summary)}")
 
     if token_candidates:
-        brief.append("<b>Candidates:</b>")
+        brief.append("🎯 <b>Candidates:</b>")
         for t in token_candidates[:3]:
             sym = html.escape(str(t.get("symbol") or ""))
             why = html.escape(str(t.get("rationale") or ""))
             rsk = _fmt_list_or_str(t.get("risks"))
-            line = f"• <code>{sym}</code> — {why}"
+            line = f"• 💎 <code>{sym}</code> — {why}"
             if rsk:
                 line += f" (risks: {html.escape(rsk)})"
             brief.append(line)
 
     if options:
-        brief.append("<b>Options:</b>")
+        brief.append("🚀 <b>Strategies:</b>")
         for idx, opt in enumerate(options):
             name = html.escape(str(opt.get("name") or f"Option {idx+1}"))
             strat = html.escape(str(opt.get("strategy") or ""))
@@ -514,16 +514,24 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pros = _fmt_list_or_str(tradeoffs)
                 cons = ""
             mark = " (default)" if default_option and name.lower() == default_option.lower() else ""
-            brief.append(f"• <b>{name}</b>{mark}: {strat}")
+            brief.append(f"• 🎯 <b>{name}</b>{mark}: {strat}")
             if rationale:
-                brief.append(f"  · Why: {rationale}")
+                brief.append(f"  · 💡 Why: {rationale}")
             if pros:
-                brief.append(f"  · Pros: {html.escape(pros)}")
+                brief.append(f"  · ✅ Pros: {html.escape(pros)}")
             if cons:
-                brief.append(f"  · Cons: {html.escape(cons)}")
+                brief.append(f"  · ⚠️ Cons: {html.escape(cons)}")
 
     if risks:
-        brief.append("<b>Key risks:</b> " + html.escape(_fmt_list_or_str(risks)))
+        risk_items = _fmt_list_or_str(risks)
+        if isinstance(risks, list):
+            risk_lines = []
+            for risk in risks:
+                risk_lines.append(f"• ⚠️ {html.escape(str(risk))}")
+            brief.append("⚠️ <b>Risks:</b>")
+            brief.extend(risk_lines)
+        else:
+            brief.append("⚠️ <b>Risks:</b> " + html.escape(risk_items))
 
     if simulation:
         crit = simulation.get("success_criteria") or {}
@@ -533,7 +541,7 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if "min_token_mcap_usd" in policy:
             gates.append(f"mcap ≥ ${int(policy['min_token_mcap_usd']):,}")
         if gates:
-            brief.append("<b>Simulate before executing:</b> " + " · ".join(gates))
+            brief.append("🎮 <b>Simulate before executing:</b> " + " · ".join(gates))
 
     await update.message.reply_text("\n".join(brief), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
@@ -585,10 +593,10 @@ async def on_option_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pros = _fmt_list_or_str(tradeoffs)
             cons = ""
 
-        lines = [f"<b>{name}</b>", strat]
-        if rationale: lines.append(f"· Why: {rationale}")
-        if pros: lines.append(f"· Pros: {html.escape(pros)}")
-        if cons: lines.append(f"· Cons: {html.escape(cons)}")
+        lines = [f"🎯 <b>{name}</b>", strat]
+        if rationale: lines.append(f"· 💡 Why: {rationale}")
+        if pros: lines.append(f"· ✅ Pros: {html.escape(pros)}")
+        if cons: lines.append(f"· ⚠️ Cons: {html.escape(cons)}")
 
         await q.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
@@ -647,10 +655,10 @@ async def on_action_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 impact = res.get("priceImpactPct"); impact_pct = f"{float(impact)*100:.2f}%" if impact is not None else None
                 slip_pct = f"{(res.get('slippageBps') or slip_bps)/100:.2f}%"
                 lines = [f"🧮 Quote {fmt(in_ui)} {in_info['symbol']} → {out_info['symbol']}"]
-                if out_ui: lines.append(f"Est. out: {fmt(out_ui)} {out_info['symbol']}")
-                if price is not None: lines.append(f"Price: 1 {in_info['symbol']} ≈ {fmt(price,6)} {out_info['symbol']}")
-                meta = f"Slippage: {slip_pct}"
-                if impact_pct: meta += f" · Impact: {impact_pct}"
+                if out_ui: lines.append(f"• 💰 Est. out: {fmt(out_ui)} {out_info['symbol']}")
+                if price is not None: lines.append(f"• 📊 Price: 1 {in_info['symbol']} ≈ {fmt(price,6)} {out_info['symbol']}")
+                meta = f"• ⚡ Slippage: {slip_pct}"
+                if impact_pct: meta += f" · 📈 Impact: {impact_pct}"
                 lines.append(meta)
                 await q.message.reply_text("\n".join(lines))
                 return
@@ -658,7 +666,7 @@ async def on_action_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             res = await _exec_post("swap", _swap_payload(ins, outs, amt, slip_bps))
             sig = pull_sig(res)
             summary = summarize_swap_like(res, ins, outs, slip_bps)
-            msg = f"🔁 Swap sent ✅\n{summary}"
+            msg = f"🔄 Swap sent ✅\n{summary}"
             if sig: msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
             await q.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
             return
@@ -741,12 +749,12 @@ async def quote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         slip_pct = f"{(res.get('slippageBps') or slip_bps) / 100:.2f}%"
         lines = [f"🧮 Quote {fmt(in_ui)} {in_info['symbol']} → {out_info['symbol']}"]
         if out_ui:
-            lines.append(f"Est. out: {fmt(out_ui)} {out_info['symbol']}")
+            lines.append(f"• 💰 Est. out: {fmt(out_ui)} {out_info['symbol']}")
         if price is not None:
-            lines.append(f"Price: 1 {in_info['symbol']} ≈ {fmt(price,6)} {out_info['symbol']}")
-        meta = f"Slippage: {slip_pct}"
+            lines.append(f"• 📊 Price: 1 {in_info['symbol']} ≈ {fmt(price,6)} {out_info['symbol']}")
+        meta = f"• ⚡ Slippage: {slip_pct}"
         if impact_pct:
-            meta += f" · Impact: {impact_pct}"
+            meta += f" · 📈 Impact: {impact_pct}"
         lines.append(meta)
         await update.message.reply_text("\n".join(lines))
     except Exception as err:
@@ -768,7 +776,7 @@ async def swap_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         res = await _exec_post("swap", _swap_payload(from_sym, to_sym, amount, slip_bps))
         sig = pull_sig(res)
         summary = summarize_swap_like(res, from_sym, to_sym, slip_bps)
-        msg = f"🔁 Swap sent ✅\n{summary}"
+        msg = f"🔄 Swap sent ✅\n{summary}"
         if sig:
             msg += f"\nTx: `{sig}`\n{solscan_url(sig)}"
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
