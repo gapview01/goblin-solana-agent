@@ -31,3 +31,4 @@ agent-keypair-*.json
 *.pem
 *.key
 .env
+deploy_telegram.sh

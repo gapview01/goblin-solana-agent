@@ -31,7 +31,8 @@ function ensureInit() {
 
 // Attempt once on boot, but don’t crash
 if (!ensureInit()) {
-  console.error("Startup warning: initialization incomplete; will retry on demand");
+  console.error("Startup error: required config missing (RPC_URL or AGENT_SECRET_B58). Exiting.");
+  process.exit(1);
 }
 
 const app = express();
@@ -39,6 +40,27 @@ const app = express();
 // Parse JSON and URL-encoded (form) bodies, and accept */*+json
 app.use(express.json({ type: ["application/json", "application/*+json"] }));
 app.use(express.urlencoded({ extended: true }));
+
+// ---------------- Error helpers ----------------
+function fail(res, http, code, userMessage, details = {}, suggestion, retriable = false) {
+  return res.status(http).json({
+    ok: false,
+    code,
+    http,
+    user_message: userMessage,
+    details,
+    suggestion,
+    retriable,
+  });
+}
+
+function firstLines(text, n = 2) {
+  try {
+    return String(text || "").split(/\n+/).slice(0, n).join(" · ");
+  } catch {
+    return String(text || "");
+  }
+}
 
 // ---------------- Health ----------------
 app.get("/health", (_req, res) => {
@@ -75,7 +97,7 @@ app.all("/balance", async (req, res) => {
     });
   } catch (e) {
     console.error("Balance error:", e.message);
-    res.status(500).json({ ok: false, error: String(e) });
+    return fail(res, 500, "UNEXPECTED", "Balance lookup failed.", { short_reason: String(e?.message || e) }, "Try again soon.");
   }
 });
 
@@ -154,7 +176,7 @@ app.post("/quote", async (req, res) => {
   try {
     let { from, to, amount, slippageBps } = req.body || {};
     if (!from || !to || amount == null) {
-      return res.status(400).json({ error: "from, to, amount required" });
+      return fail(res, 400, "INVALID_AMOUNT", "That amount is cursed.", {}, "Use a positive number like 0.05");
     }
     from = String(from).toUpperCase();
     to   = String(to).toUpperCase();
@@ -168,20 +190,21 @@ app.post("/quote", async (req, res) => {
     if (!outputMint) outputMint = await resolveMintBySymbol(to);
 
     if (!inputMint || !outputMint) {
-      return res.status(400).json({ error: "could not resolve mint(s)", from, to });
+      return fail(res, 400, "ROUTE_NOT_FOUND", "No viable route found.", { from, to }, "Try smaller size or a more liquid token.");
     }
 
     const decimals = getDecimals(from);
     const amountBase = Math.round(Number(amount) * 10 ** decimals);
     if (!Number.isFinite(amountBase) || amountBase <= 0) {
-      return res.status(400).json({ error: "invalid amount" });
+      return fail(res, 400, "INVALID_AMOUNT", "That amount is cursed.", {}, "Use a positive number like 0.05");
     }
 
     const quote = await jupQuote(inputMint, outputMint, amountBase, slippageBps);
     res.json(quote);
   } catch (e) {
     console.error("Quote error:", e.message);
-    res.status(502).json({ error: String(e) });
+    const reason = firstLines(e?.message || e);
+    return fail(res, 502, "ROUTE_NOT_FOUND", "No viable route found.", { short_reason: reason }, "Try smaller size or a more liquid token.");
   }
 });
 
@@ -195,7 +218,7 @@ app.post("/swap", async (req, res) => {
 
     let { from, to, amount, slippageBps } = req.body || {};
     if (!from || !to || amount == null) {
-      return res.status(400).json({ error: "from, to, amount required" });
+      return fail(res, 400, "INVALID_AMOUNT", "That amount is cursed.", {}, "Use a positive number like 0.05");
     }
     from = String(from).toUpperCase();
     to = String(to).toUpperCase();
@@ -208,15 +231,124 @@ app.post("/swap", async (req, res) => {
     const decimals = getDecimals(from);
     const amountBase = Math.round(Number(amount) * 10 ** decimals);
     if (!Number.isFinite(amountBase) || amountBase <= 0) {
-      return res.status(400).json({ error: "invalid amount" });
+      return fail(res, 400, "INVALID_AMOUNT", "That amount is cursed.", {}, "Use a positive number like 0.05");
+    }
+
+    // Pre-check SOL balance to avoid wasting time if underfunded
+    if (from === "SOL") {
+      const lamports = Math.round(Number(amount) * 1_000_000_000);
+      const bal = await conn.getBalance(wallet.publicKey, "confirmed");
+      const buffersLamports = 2_700_000; // rent + fees + tip
+      if (lamports + buffersLamports > bal) {
+        const tryLamports = Math.max(0, bal - buffersLamports);
+        return fail(
+          res,
+          400,
+          "INSUFFICIENT_SOL",
+          `Not enough SOL, goblin. Need ${(lamports + buffersLamports) / 1e9} incl. fees; you’ve got ${bal / 1e9}.`,
+          {
+            need_sol: (lamports + buffersLamports) / 1e9,
+            have_sol: bal / 1e9,
+            try_sol: Math.max(0, tryLamports) / 1e9,
+          },
+          `Try ${(Math.max(0, tryLamports) / 1e9).toFixed(3)} SOL or top up.`,
+          false
+        );
+      }
     }
 
     const quote = await jupQuote(inputMint, outputMint, amountBase, slippageBps);
     const sig = await jupSwapFromQuote(quote);
-    return res.json({ txSignature: sig });
+    return res.json({ ok: true, signature: sig });
   } catch (e) {
     console.error("Swap error:", e.message);
-    return res.status(502).json({ error: String(e) });
+    const reason = firstLines(e?.message || e);
+    return fail(res, 502, "SWAP_FAILED", "Sim says no.", { short_reason: reason }, "Try smaller size or re‑quote.");
+  }
+});
+
+// ---------------- Simulate Scenarios ----------------
+app.post("/simulate", (req, res) => {
+  try {
+    const options = Array.isArray(req.body?.options) ? req.body.options : [];
+    const baseline = req.body?.baseline ?? { name: "Hold SOL" };
+    const horizonDays = Number(req.body?.horizon_days ?? 30);
+    const horizon = Number.isFinite(horizonDays) && horizonDays > 0 ? Math.floor(horizonDays) : 30;
+    const timeline = Array.from({ length: horizon + 1 }, (_v, idx) => idx);
+
+    const baseSeries = {
+      name: typeof baseline?.name === "string" ? baseline.name : "Hold SOL",
+      t: timeline,
+      v: timeline.map(() => 1.0),
+    };
+
+    // Assumptions for quick, sensible curves (no external data):
+    // - LSD staking (JitoSOL/mSOL/bSOL/scnSOL): ~7% APR → daily factor
+    // - Split stake & hold: 50% LSD, 50% baseline
+    // - Stable (USDC) or unknown: flat baseline
+    const LSD_SYMBOLS = new Set(["JITOSOL", "MSOL", "BSOL", "SCNSOL"]);
+
+    function dailySeriesFromApr(apr, days) {
+      const daily = Math.pow(1 + apr, 1 / 365) - 1;
+      const out = [];
+      let value = 1.0;
+      for (let t = 0; t <= days; t++) {
+        if (t === 0) out.push(1.0);
+        else {
+          value = Number((value * (1 + daily)).toFixed(6));
+          out.push(value);
+        }
+      }
+      return out;
+    }
+
+    function classifyOption(opt) {
+      const name = (opt?.name || "").toString().toUpperCase();
+      const plan = Array.isArray(opt?.plan) ? opt.plan : [];
+      let touchesLsd = false;
+      let touchesStable = false;
+      let mentionsSplit = name.includes("SPLIT");
+      for (const a of plan) {
+        const verb = (a?.verb || "").toString().toLowerCase();
+        const p = a?.params || {};
+        const token = (p?.protocol || p?.to || p?.out || "").toString().toUpperCase();
+        if (verb === "stake") touchesLsd = true;
+        if (verb === "swap" && LSD_SYMBOLS.has(token)) touchesLsd = true;
+        if (verb === "swap" && token === "USDC") touchesStable = true;
+      }
+      if (mentionsSplit) return "split";
+      if (touchesLsd) return "lsd";
+      if (touchesStable) return "stable";
+      return "flat";
+    }
+
+    const lsdCurve = dailySeriesFromApr(0.07, horizon);
+
+    const scenarioSeries = options.slice(0, 3).map((opt, idx) => {
+      const name = typeof opt?.name === "string" && opt.name ? opt.name : `Scenario ${idx + 1}`;
+      const kind = classifyOption(opt);
+      let values;
+      if (kind === "lsd") {
+        values = lsdCurve;
+      } else if (kind === "split") {
+        values = timeline.map((t) => Number((0.5 * 1.0 + 0.5 * lsdCurve[t]).toFixed(6)));
+      } else if (kind === "stable") {
+        values = timeline.map(() => 1.0);
+      } else {
+        values = timeline.map(() => 1.0);
+      }
+      return { name, t: timeline, v: values };
+    });
+
+    const scenarioLabel = scenarioSeries.length ? scenarioSeries.map((s) => s.name).join(" / ") : "no scenarios";
+
+    res.json({
+      title: `Baseline vs Scenarios (${horizon}d)`,
+      caption: `Baseline (${baseSeries.name}) compared with ${scenarioLabel}`,
+      series: [baseSeries, ...scenarioSeries],
+    });
+  } catch (e) {
+    res.status(500).json({ error: "SIMULATION_FAILED", detail: String(e?.message || e) });
   }
 });
 
@@ -245,17 +377,39 @@ app.post("/stake", async (req, res) => {
     console.log("STAKE req", req.headers["content-type"], req.body, req.query);
 
     if (!protocol || amountLamports == null) {
-      return res.status(400).json({ error: "protocol and amountLamports required" });
+      return fail(res, 400, "INVALID_AMOUNT", "That amount is cursed.");
     }
     if (protocol !== "jito") {
-      return res.status(400).json({ error: "unsupported protocol", supported: ["jito"] });
+      return fail(res, 400, "STAKE_PROTOCOL_UNSUPPORTED", "Only Jito staking for now.", { supported: ["jito"] }, "Use JITOSOL.");
     }
 
     const jitoMint = await resolveMintBySymbol("JITOSOL");
-    if (!jitoMint) return res.status(400).json({ error: "could not resolve JITOSOL mint" });
+    if (!jitoMint) return fail(res, 400, "ROUTE_NOT_FOUND", "No viable route found.", { token: "JITOSOL" });
 
     // Convert lamports -> SOL float for quote
     const amountSol = Number(amountLamports) / 1_000_000_000;
+
+    // Pre-check SOL balance & buffers
+    const bal = await conn.getBalance(wallet.publicKey, "confirmed");
+    const buffersLamports = 2_700_000;
+    const needLamports = Math.round(Number(amountLamports));
+    if (needLamports + buffersLamports > bal) {
+      const tryLamports = Math.max(0, bal - buffersLamports);
+      return fail(
+        res,
+        400,
+        "INSUFFICIENT_SOL",
+        `Not enough SOL, goblin. Need ${(needLamports + buffersLamports) / 1e9} incl. fees; you’ve got ${bal / 1e9}.`,
+        {
+          need_sol: (needLamports + buffersLamports) / 1e9,
+          have_sol: bal / 1e9,
+          try_sol: Math.max(0, tryLamports) / 1e9,
+        },
+        `Try ${(Math.max(0, tryLamports) / 1e9).toFixed(3)} SOL or top up.`,
+        false
+      );
+    }
+
     const inputMint = MINTS.SOL;       // SOL mint
     const outputMint = jitoMint;       // jitoSOL mint
     const amountBase = Math.round(amountSol * 10 ** getDecimals("SOL"));
@@ -263,10 +417,11 @@ app.post("/stake", async (req, res) => {
     const quote = await jupQuote(inputMint, outputMint, amountBase, /*slippage*/ 50);
     const sig = await jupSwapFromQuote(quote);
 
-    return res.json({ txSignature: sig });
+    return res.json({ ok: true, signature: sig });
   } catch (e) {
     console.error("Stake error:", e.message);
-    return res.status(502).json({ error: String(e) });
+    const reason = firstLines(e?.message || e);
+    return fail(res, 502, "SWAP_FAILED", "Sim says no.", { short_reason: reason }, "Try smaller size or re‑quote.");
   }
 });
 
@@ -285,14 +440,14 @@ app.post("/unstake", async (req, res) => {
     console.log("UNSTAKE req", req.headers["content-type"], req.body, req.query);
 
     if (!protocol || amountLamports == null) {
-      return res.status(400).json({ error: "protocol and amountLamports required" });
+      return fail(res, 400, "INVALID_AMOUNT", "That amount is cursed.");
     }
     if (protocol !== "jito") {
-      return res.status(400).json({ error: "unsupported protocol", supported: ["jito"] });
+      return fail(res, 400, "STAKE_PROTOCOL_UNSUPPORTED", "Only Jito staking for now.", { supported: ["jito"] }, "Use JITOSOL.");
     }
 
     const jitoMint = await resolveMintBySymbol("JITOSOL");
-    if (!jitoMint) return res.status(400).json({ error: "could not resolve JITOSOL mint" });
+    if (!jitoMint) return fail(res, 400, "ROUTE_NOT_FOUND", "No viable route found.", { token: "JITOSOL" });
 
     // amountLamports uses 9dp for jitoSOL as well (MVP)
     const amountJito = Number(amountLamports) / 1_000_000_000;
@@ -303,10 +458,11 @@ app.post("/unstake", async (req, res) => {
     const quote = await jupQuote(inputMint, outputMint, amountBase, /*slippage*/ 50);
     const sig = await jupSwapFromQuote(quote);
 
-    return res.json({ txSignature: sig });
+    return res.json({ ok: true, signature: sig });
   } catch (e) {
     console.error("Unstake error:", e.message);
-    return res.status(502).json({ error: String(e) });
+    const reason = firstLines(e?.message || e);
+    return fail(res, 502, "SWAP_FAILED", "Sim says no.", { short_reason: reason }, "Try smaller size or re‑quote.");
   }
 });
 
