@@ -71,6 +71,24 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
+# ---------- logging helpers ----------
+def _mask(value: str, keep: int = 4) -> str:
+    if not value:
+        return ""
+    s = str(value)
+    if len(s) <= keep:
+        return "*" * len(s)
+    return ("*" * (len(s) - keep)) + s[-keep:]
+
+def _log_runtime_config() -> None:
+    try:
+        logging.info("Runtime: USE_POLLING=%s PORT=%s NETWORK=%s", USE_POLLING, PORT, NETWORK)
+        logging.info("Webhook: base_url=%s secret=%s", WEBHOOK_BASE_URL or "(unset)", _mask(WEBHOOK_SECRET))
+        logging.info("Telegram: token=%s", _mask(TOKEN))
+        logging.info("Executor: base_url=%s", EXECUTOR_BASE_URL or "(unset)")
+    except Exception:
+        logging.exception("Failed to log runtime config")
+
 # ---------- goblin-brand error formatter ----------
 def _goblin_error_message(err: HTTPStatusError | Exception) -> str:
     try:
@@ -423,8 +441,20 @@ async def reconcile_webhook(app: Application):
             return
         expected = f"{WEBHOOK_BASE_URL}/webhook/{WEBHOOK_SECRET}"
         info = await app.bot.get_webhook_info()
+        try:
+            logging.info(
+                "Webhook info: url=%r pending=%s ip=%s last_error_date=%s last_error_message=%r",
+                getattr(info, "url", None),
+                getattr(info, "pending_update_count", None),
+                getattr(info, "ip_address", None),
+                getattr(info, "last_error_date", None),
+                getattr(info, "last_error_message", None),
+            )
+        except Exception:
+            logging.debug("Failed to log webhook info details", exc_info=True)
         current = info.url or ""
         if current != expected:
+            logging.warning("Webhook mismatch: current=%r expected=%r — setting webhook", current, expected)
             await app.bot.set_webhook(
                 url=expected,
                 secret_token=WEBHOOK_SECRET,
@@ -1015,39 +1045,18 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Warm Jupiter list in background (faster first quote)
     asyncio.create_task(_jup_tokenlist())
 
-    # Render simplified plan summary first
+    # Render simplified plan summary first (leave the original "Planning…" stub visible)
     try:
         logging.info("plan:render_simple")
         simple = render_plan_simple(goal, exec_plan)
-        # Prefer editing the stub so the summary replaces "Planning…" in place
-        if stub_msg and getattr(stub_msg, "message_id", None):
-            try:
-                await ctx.bot.edit_message_text(
-                    chat_id=stub_msg.chat_id,
-                    message_id=stub_msg.message_id,
-                    text=simple,
-                    parse_mode=None,
-                    disable_web_page_preview=True,
-                )
-            except Exception:
-                # Fallback: send as a new message without reply threading
-                await _send_message_with_retry(
-                    ctx,
-                    chat_id=update.effective_chat.id,
-                    text=simple,
-                    parse_mode=None,
-                    reply_markup=None,
-                    reply_to_message_id=None,
-                )
-        else:
-            await _send_message_with_retry(
-                ctx,
-                chat_id=update.effective_chat.id,
-                text=simple,
-                parse_mode=None,
-                reply_markup=None,
-                reply_to_message_id=None,
-            )
+        await _send_message_with_retry(
+            ctx,
+            chat_id=update.effective_chat.id,
+            text=simple,
+            parse_mode=None,
+            reply_markup=None,
+            reply_to_message_id=None,
+        )
     except Exception:
         pass
 
@@ -1246,6 +1255,10 @@ def _build_web_app(tg_app: Application) -> web.Application:
     app = web.Application()
 
     async def sim_page(_request: web.Request) -> web.Response:
+        try:
+            logging.debug("[sim_page] GET %s from %s", _request.path_qs, _request.remote)
+        except Exception:
+            pass
         headers = {"Content-Security-Policy": "frame-ancestors https://*.telegram.org https://web.telegram.org https://*.web.telegram.org https://t.me https://*.t.me"}
         return web.Response(text=_WEB_HTML, content_type="text/html", headers=headers)
 
@@ -1354,19 +1367,38 @@ def _build_web_app(tg_app: Application) -> web.Application:
             return web.json_response({"ok": False, "text": "⚠️ Render failed."}, status=200)
 
     async def webhook_handler(request: web.Request) -> web.Response:
+        try:
+            logging.debug("[webhook] %s %s from %s", request.method, request.path_qs, request.remote)
+        except Exception:
+            pass
         if request.method != "POST":
             return web.Response(status=405)
         # Verify Telegram secret token if provided
         secret_hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if WEBHOOK_SECRET and secret_hdr != WEBHOOK_SECRET:
+            try:
+                logging.warning("[webhook] secret mismatch remote=%s got=%r expected=%r", request.remote, secret_hdr, "***")
+            except Exception:
+                pass
             return web.Response(status=403, text="forbidden")
         try:
-            data = await request.json()
+            body = await request.read()
+            # Log small bodies (e.g., health checks from reverse proxy) and size otherwise
+            try:
+                if len(body) <= 256:
+                    logging.debug("[webhook] body=%r", body.decode(errors="ignore"))
+                else:
+                    logging.debug("[webhook] body_len=%d", len(body))
+            except Exception:
+                pass
+            data = json.loads(body.decode("utf-8"))
         except Exception:
+            logging.exception("[webhook] bad json from %s", request.remote)
             return web.Response(status=400, text="bad json")
         try:
             update = Update.de_json(data, tg_app.bot)
             await tg_app.update_queue.put(update)
+            logging.debug("[webhook] enqueued update ok")
         except Exception:
             logging.exception("webhook_handler failed to enqueue update")
             return web.Response(status=500, text="enqueue failed")
@@ -1385,7 +1417,22 @@ def _build_web_app(tg_app: Application) -> web.Application:
         try:
             await tg_app.initialize()
             await tg_app.start()
+            try:
+                me = await tg_app.bot.get_me()
+                logging.info("Bot identity: id=%s username=@%s name=%s", getattr(me, "id", None), getattr(me, "username", None), getattr(me, "full_name", None))
+            except Exception:
+                logging.debug("Failed to fetch bot identity", exc_info=True)
             await reconcile_webhook(tg_app)
+            try:
+                info = await tg_app.bot.get_webhook_info()
+                logging.info(
+                    "Post-reconcile webhook: url=%r pending=%s ip=%s",
+                    getattr(info, "url", None),
+                    getattr(info, "pending_update_count", None),
+                    getattr(info, "ip_address", None),
+                )
+            except Exception:
+                logging.debug("Failed to fetch webhook info after reconcile", exc_info=True)
             logging.info("Startup complete")
         except Exception:
             logging.exception("Startup failed")
@@ -1957,6 +2004,7 @@ def add_handlers(a: Application):
 def main():
     add_handlers(app)
     logging.info("Planner wired? %s from %s", llm_plan is not None, getattr(llm_plan, "__module__", None))
+    _log_runtime_config()
     if USE_POLLING:
         logging.info("Starting in polling mode (USE_POLLING=1)")
         # Polling mode bypasses webhook delivery; good for quick recovery and tests

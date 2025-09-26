@@ -73,7 +73,8 @@ def render_plan_simple(goal: str, playback: Dict[str, Any]) -> str:
     for opt in options[:3]:
         name = str(opt.get("name") or "Strategy").strip()[:40].rstrip()
         why = _expand_abbrev(str(opt.get("strategy") or opt.get("rationale") or opt.get("bucket") or "").strip())
-        lines.append(_clamp_line(f"- {name} — {_summarize(_shorten_words(why, 12), 160)}"))
+        # Use _clamp_line to summarize within 160 chars; _summarize is not defined
+        lines.append(_clamp_line(f"- {name} — {_clamp_line(_shorten_words(why, 12), 160)}"))
     lines.append("")
 
     # Risks (map or default)
