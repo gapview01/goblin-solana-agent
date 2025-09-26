@@ -44,7 +44,17 @@ gcloud run services update "$SERVICE" --region "$REGION" \
   --set-secrets "$SECRETS"
 
 # ---- build & deploy from source
-gcloud run deploy "$SERVICE" --region "$REGION" --source . --allow-unauthenticated --min-instances=1 --max-instances=3 --ingress all --cpu=1 --memory=512Mi
+gcloud run deploy "$SERVICE" \
+  --region "$REGION" \
+  --source . \
+  --allow-unauthenticated \
+  --min-instances=1 \
+  --max-instances=3 \
+  --ingress all \
+  --cpu=1 \
+  --memory=512Mi \
+  --set-env-vars "$ENV_VARS" \
+  --set-secrets "$SECRETS"
 
 # ---- quick sanity: print the envs the service is actually running with
 gcloud run services describe "$SERVICE" --region "$REGION" \
