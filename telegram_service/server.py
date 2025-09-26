@@ -363,12 +363,12 @@ def summarize_swap_like(res: dict, fallback_in_sym: str, fallback_out_sym: str, 
         lines.append(f"{fmt(in_ui)} {in_info['symbol']}")
     if price is not None:
         lines.append(f"Price: 1 {in_info['symbol']} ≈ {fmt(price,6)} {out_info['symbol']}")
-    meta = f"Slippage: {slip_pct}"
+    # Add emoji bullets for meta details
+    lines.append(f"• ⚡ Slippage: {slip_pct}")
     if impact_pct:
-        meta += f" · Impact: {impact_pct}"
-    lines.append(meta)
+        lines.append(f"• 📈 Impact: {impact_pct}")
     if route:
-        lines.append(f"Route: {route}")
+        lines.append(f"• 🧭 Route: {route}")
     return "\n".join(lines)
 
 # ---------- protocol & unit helpers ----------
@@ -541,7 +541,10 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if "min_token_mcap_usd" in policy:
             gates.append(f"mcap ≥ ${int(policy['min_token_mcap_usd']):,}")
         if gates:
-            brief.append("🎮 <b>Simulate before executing:</b> " + " · ".join(gates))
+            brief.append("🎮 <b>Simulate before executing:</b>")
+            for g in gates:
+                emoji = "📈" if "impact" in g else ("💰" if "mcap" in g else "🎯")
+                brief.append(f"• {emoji} {g}")
 
     await update.message.reply_text("\n".join(brief), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
@@ -593,10 +596,11 @@ async def on_option_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pros = _fmt_list_or_str(tradeoffs)
             cons = ""
 
-        lines = [f"🎯 <b>{name}</b>", strat]
-        if rationale: lines.append(f"· 💡 Why: {rationale}")
-        if pros: lines.append(f"· ✅ Pros: {html.escape(pros)}")
-        if cons: lines.append(f"· ⚠️ Cons: {html.escape(cons)}")
+        lines = [f"🎯 <b>{name}</b>"]
+        if strat: lines.append(f"• 🧩 Strategy: {strat}")
+        if rationale: lines.append(f"• 💡 Why: {rationale}")
+        if pros: lines.append(f"• ✅ Pros: {html.escape(pros)}")
+        if cons: lines.append(f"• ⚠️ Cons: {html.escape(cons)}")
 
         await q.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
@@ -657,9 +661,8 @@ async def on_action_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 lines = [f"🧮 Quote {fmt(in_ui)} {in_info['symbol']} → {out_info['symbol']}"]
                 if out_ui: lines.append(f"• 💰 Est. out: {fmt(out_ui)} {out_info['symbol']}")
                 if price is not None: lines.append(f"• 📊 Price: 1 {in_info['symbol']} ≈ {fmt(price,6)} {out_info['symbol']}")
-                meta = f"• ⚡ Slippage: {slip_pct}"
-                if impact_pct: meta += f" · 📈 Impact: {impact_pct}"
-                lines.append(meta)
+                lines.append(f"• ⚡ Slippage: {slip_pct}")
+                if impact_pct: lines.append(f"• 📈 Impact: {impact_pct}")
                 await q.message.reply_text("\n".join(lines))
                 return
 
@@ -752,10 +755,9 @@ async def quote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             lines.append(f"• 💰 Est. out: {fmt(out_ui)} {out_info['symbol']}")
         if price is not None:
             lines.append(f"• 📊 Price: 1 {in_info['symbol']} ≈ {fmt(price,6)} {out_info['symbol']}")
-        meta = f"• ⚡ Slippage: {slip_pct}"
+        lines.append(f"• ⚡ Slippage: {slip_pct}")
         if impact_pct:
-            meta += f" · 📈 Impact: {impact_pct}"
-        lines.append(meta)
+            lines.append(f"• 📈 Impact: {impact_pct}")
         await update.message.reply_text("\n".join(lines))
     except Exception as err:
         await update.message.reply_text(f"⚠️ Quote failed: {err}")
