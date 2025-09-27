@@ -19,12 +19,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install gcloud
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
-          service_account_key: ${{ secrets.GCP_SA_KEY }}
-          export_default_credentials: true
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
       - name: Deploy staging
         run: |
           chmod +x scripts/deploy-staging.sh
@@ -36,6 +42,9 @@ jobs:
           WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}
           ALLOWED_TELEGRAM_USER_IDS: ${{ secrets.ALLOWED_TELEGRAM_USER_IDS }}
           PLANNER_TIMEOUT_SEC: 8
+          SECRET_OPENAI: openai-api-key-stg
+          SECRET_TELEGRAM: telegram-bot-token-stg
+          SECRET_WEBHOOK: telegram-webhook-secret-stg
       - name: Resolve staging URL
         id: url
         run: |

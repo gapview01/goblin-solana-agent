@@ -2,7 +2,7 @@ name: Auto-Fix Common Issues
 
 on:
   workflow_run:
-    workflows: ["GitOps Pipeline - Build → Test → Integrate → Deploy → Merge"]
+    workflows: ["GitOps Pipeline - Build → Test → Integrate → Deploy → Merge", "Staging Deploy and Smoke Tests", "CI"]
     types: [completed]
     branches: [main, develop, 'feature/*', 'hotfix/*']
 
@@ -27,6 +27,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pytest black isort flake8
+          sudo apt-get update && sudo apt-get install -y jq || true
       
       - name: Auto-fix Python formatting
         run: |
