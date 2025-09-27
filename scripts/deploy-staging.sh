@@ -27,6 +27,14 @@ RUNTIME_SA_DEFAULT="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 RUNTIME_SA="${RUNTIME_SA:-$RUNTIME_SA_DEFAULT}"
 echo "Runtime Service Account: $RUNTIME_SA"
 
+# Ensure runtime SA can access staging secrets BEFORE deploy (idempotent)
+for S in ${SECRET_OPENAI:-openai-api-key-stg} ${SECRET_TELEGRAM:-telegram-bot-token-stg} ${SECRET_WEBHOOK:-telegram-webhook-secret-stg}; do
+  echo "Granting secretAccessor on $S to $RUNTIME_SA (idempotent)…"
+  gcloud secrets add-iam-policy-binding "$S" \
+    --member="serviceAccount:${RUNTIME_SA}" \
+    --role="roles/secretmanager.secretAccessor" >/dev/null || true
+done
+
 # Resolve current URL if service exists
 SERVICE_URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
 
@@ -72,14 +80,6 @@ if [[ -n "$SERVICE_URL" ]]; then
   gcloud run services update "$SERVICE" --region "$REGION" \
     --update-env-vars "BASE_URL=${SERVICE_URL}" >/dev/null
 fi
-
-# Ensure runtime SA can access staging secrets
-for S in ${SECRET_OPENAI:-openai-api-key-stg} ${SECRET_TELEGRAM:-telegram-bot-token-stg} ${SECRET_WEBHOOK:-telegram-webhook-secret-stg}; do
-  echo "Granting secretAccessor on $S to $RUNTIME_SA (idempotent)…"
-  gcloud secrets add-iam-policy-binding "$S" \
-    --member="serviceAccount:${RUNTIME_SA}" \
-    --role="roles/secretmanager.secretAccessor" >/dev/null || true
-done
 
 echo "Staging deploy complete. URL: $SERVICE_URL"
 
