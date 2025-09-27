@@ -1,0 +1,62 @@
+name: Staging Deploy and Smoke Tests
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: stg-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+      - name: Deploy staging
+        run: |
+          chmod +x scripts/deploy-staging.sh
+          ./scripts/deploy-staging.sh
+        env:
+          OPENAI_PROJECT: ${{ secrets.OPENAI_PROJECT }}
+          EXECUTOR_URL: ${{ secrets.EXECUTOR_URL }}
+          EXECUTOR_TOKEN: ${{ secrets.EXECUTOR_TOKEN }}
+          WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}
+          ALLOWED_TELEGRAM_USER_IDS: ${{ secrets.ALLOWED_TELEGRAM_USER_IDS }}
+          PLANNER_TIMEOUT_SEC: 8
+      - name: Resolve staging URL
+        id: url
+        run: |
+          URL=$(gcloud run services describe telegram-service-stg --region australia-southeast1 --format='value(status.url)')
+          echo "url=$URL" >> $GITHUB_OUTPUT
+      - name: Smoke - port/health
+        run: |
+          curl -sSfL ${{ steps.url.outputs.url }} >/dev/null || (echo "Home failed" && exit 1)
+      - name: Smoke - getMe (Telegram)
+        run: |
+          curl -sSfL "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getMe" | jq .ok | grep true
+      - name: Smoke - webhook reconcile
+        run: |
+          echo "Webhook will be reconciled by app on start; verifying URL…"
+          set -e
+          INFO=$(curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getWebhookInfo")
+          echo "$INFO" | jq .ok | grep true
+      - name: Emoji snapshot test (static)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pytest tests/test_emoji_patterns.py -q
+
+
