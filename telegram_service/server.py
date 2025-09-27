@@ -925,16 +925,28 @@ def main():
     logging.info("Planner wired? %s from %s", llm_plan is not None, getattr(llm_plan, "__module__", None))
     if BASE_URL:
         url_path = f"webhook/{WEBHOOK_SECRET}"
-        webhook_url = f"{BASE_URL}/{url_path}"
-        logging.info("Starting webhook server at %s", webhook_url)
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=url_path,
-            webhook_url=webhook_url,
-            secret_token=WEBHOOK_SECRET,
-            drop_pending_updates=True,
-        )
+        # If BASE_URL is provisional/unknown, start the HTTP server without setting the Telegram webhook yet
+        is_provisional = "invalid" in BASE_URL.lower()
+        if is_provisional:
+            logging.info("Starting webhook HTTP server (provisional BASE_URL); deferring Telegram setWebhook")
+            app.run_webhook(
+                listen="0.0.0.0",
+                port=PORT,
+                url_path=url_path,
+                secret_token=WEBHOOK_SECRET,
+                drop_pending_updates=True,
+            )
+        else:
+            webhook_url = f"{BASE_URL}/{url_path}"
+            logging.info("Starting webhook server at %s", webhook_url)
+            app.run_webhook(
+                listen="0.0.0.0",
+                port=PORT,
+                url_path=url_path,
+                webhook_url=webhook_url,
+                secret_token=WEBHOOK_SECRET,
+                drop_pending_updates=True,
+            )
     else:
         logging.info("BASE_URL not set -> polling mode (not suitable for Cloud Run)")
         app.run_polling(drop_pending_updates=True)
