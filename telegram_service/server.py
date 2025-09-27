@@ -25,6 +25,7 @@ SHOW_PLAN_JSON = (os.getenv("SHOW_PLAN_JSON") or "0").lower() in ("1", "true", "
 
 # Planner selection: "llm" (default) prefers planner/llm_planner.py; set to "legacy" for planner/planner.py
 PLANNER_IMPL   = (os.getenv("PLANNER_IMPL") or "llm").lower()
+PLANNER_TIMEOUT_SEC = int(os.getenv("PLANNER_TIMEOUT_SEC") or "20")
 REQUIRE_LLM    = (os.getenv("REQUIRE_LLM_PLANNER") or "0").lower() in ("1", "true", "yes")
 
 # Executor (backend) config
@@ -109,6 +110,27 @@ def _fmt_list_or_str(x) -> str:
         return x
     return ""
 
+def _quick_plan_json(goal: str) -> str:
+    """Very fast minimal JSON plan used on timeouts/errors to keep UX snappy."""
+    fallback = {
+        "summary": f"Plan for: {goal}",
+        "policy": {"min_token_mcap_usd": MIN_TOKEN_MCAP_USD},
+        "options": [{
+            "name": "Standard",
+            "strategy": "Check balance, quote a swap, and proceed only if price impact is acceptable.",
+            "rationale": "Low risk, simple execution.",
+            "tradeoffs": {"pros": ["Quick"], "cons": ["May miss better routes"]},
+            "plan": [
+                {"verb": "balance", "params": {}, "requires_approval": False},
+                {"verb": "quote",   "params": {"in": "SOL", "out": "USDC", "amount": "0.10"}, "requires_approval": False}
+            ]
+        }],
+        "default_option": "Standard",
+        "risks": ["Price impact", "Slippage", "Protocol risk"],
+        "simulation": {"success_criteria": {"max_price_impact_bps": 200}}
+    }
+    return json.dumps(fallback, ensure_ascii=False)
+
 async def _call_planner(goal: str) -> str:
     """
     Calls the planner with:
@@ -118,7 +140,7 @@ async def _call_planner(goal: str) -> str:
     """
     if not llm_plan:
         return f"(demo) Plan for: {goal}"
-    try:
+    async def _invoke() -> str:
         # get SOL balance for balance-aware sizing
         sol = 0.0
         try:
@@ -141,17 +163,23 @@ async def _call_planner(goal: str) -> str:
             kwargs["source"] = "telegram"
 
         if "goal" in sig.parameters and ("text" not in sig.parameters):
-            res = llm_plan(goal, **kwargs)
+            out = llm_plan(goal, **kwargs)
         else:
             kwargs["text"] = goal
-            res = llm_plan(**kwargs)
+            out = llm_plan(**kwargs)
 
-        if inspect.isawaitable(res):
-            res = await res
-        return str(res)
+        if inspect.isawaitable(out):
+            out = await out
+        return str(out)
+
+    try:
+        return await asyncio.wait_for(_invoke(), timeout=PLANNER_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        logging.warning("Planner timed out after %ss; using quick fallback", PLANNER_TIMEOUT_SEC)
+        return _quick_plan_json(goal)
     except Exception:
-        logging.exception("planner.plan crashed")
-        return "⚠️ Planner error. Check Cloud Run logs."
+        logging.exception("planner.plan crashed; using quick fallback")
+        return _quick_plan_json(goal)
 
 def _is_allowed(update: Update) -> bool:
     if not ALLOWED_USER_IDS:
