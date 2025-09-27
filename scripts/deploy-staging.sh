@@ -38,16 +38,16 @@ done
 # Resolve current URL if service exists
 SERVICE_URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
 
-BASE_ENV="LOG_LEVEL=DEBUG,PLANNER_IMPL=llm,EXECUTOR_URL=${EXECUTOR_URL},WALLET_ADDRESS=${WALLET_ADDRESS},NETWORK=mainnet,DEFAULT_SLIPPAGE_BPS=100,ALLOWED_TELEGRAM_USER_IDS=${ALLOWED_TELEGRAM_USER_IDS},ALLOWED_TOKENS=*,MIN_TOKEN_MCAP_USD=15000000,PLANNER_TIMEOUT_SEC=${PLANNER_TIMEOUT_SEC}"
+# Use a provisional BASE_URL so the container starts an HTTP server on first boot
+PROVISIONAL_BASE_URL="https://staging.invalid"
+BASE_ENV="BASE_URL=${PROVISIONAL_BASE_URL},LOG_LEVEL=DEBUG,PLANNER_IMPL=llm,EXECUTOR_URL=${EXECUTOR_URL},WALLET_ADDRESS=${WALLET_ADDRESS},NETWORK=mainnet,DEFAULT_SLIPPAGE_BPS=100,ALLOWED_TELEGRAM_USER_IDS=${ALLOWED_TELEGRAM_USER_IDS},ALLOWED_TOKENS=*,MIN_TOKEN_MCAP_USD=15000000,PLANNER_TIMEOUT_SEC=${PLANNER_TIMEOUT_SEC}"
 if [[ -n "$EXECUTOR_TOKEN" ]]; then
   BASE_ENV+=" ,EXECUTOR_TOKEN=${EXECUTOR_TOKEN}"
 fi
 if [[ -n "$OPENAI_PROJECT" ]]; then
   BASE_ENV="OPENAI_PROJECT=${OPENAI_PROJECT},${BASE_ENV}"
 fi
-if [[ -n "$SERVICE_URL" ]]; then
-  BASE_ENV="BASE_URL=${SERVICE_URL},${BASE_ENV}"
-fi
+# Do not override provisional before first deploy; we'll set the real BASE_URL after we know it
 
 # staging secrets (use separate keys)
 SECRETS="OPENAI_API_KEY=${SECRET_OPENAI:-openai-api-key-stg}:latest,TELEGRAM_BOT_TOKEN=${SECRET_TELEGRAM:-telegram-bot-token-stg}:latest,WEBHOOK_SECRET=${SECRET_WEBHOOK:-telegram-webhook-secret-stg}:latest"
