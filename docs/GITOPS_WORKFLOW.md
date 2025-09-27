@@ -20,6 +20,13 @@ graph LR
 - **Pull requests require all checks to pass**
 - **Manual approval required for production merges**
 
+## 🚀 Environments
+
+- Staging: single-user, dev wallet (your Telegram ID), mainnet. Service: `telegram-service-stg`. Secrets: `*-stg`.
+- Production: multi-user, high-performance, separate bot identity. Service: `telegram-service`. Secrets: `*-prod`.
+
+Promotion: main → auto deploy to staging (smoke tests) → manual promotion to production with `./deploy_telegram.sh`.
+
 ## 🚀 Development Workflow
 
 ### Quick Command (Recommended)

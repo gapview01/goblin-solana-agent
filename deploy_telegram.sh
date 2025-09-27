@@ -17,6 +17,11 @@ EXECUTOR_TOKEN="${EXECUTOR_TOKEN:-}"   # leave empty unless you actually use it
 WALLET_ADDRESS="534sbVhF16EH8WoQumiawMy9gvbcLhGrXUroaSbyAFDv"
 ALLOWED_TELEGRAM_USER_IDS="6149503319"
 
+# ---- secret names (prod by default; override via env)
+SECRET_OPENAI="${SECRET_OPENAI:-openai-api-key-prod}"
+SECRET_TELEGRAM="${SECRET_TELEGRAM:-telegram-bot-token-prod}"
+SECRET_WEBHOOK="${SECRET_WEBHOOK:-telegram-webhook-secret-prod}"
+
 # ---- resolve Telegram service URL for webhook
 SERVICE_URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"
 if [[ -z "$SERVICE_URL" ]]; then
@@ -33,7 +38,7 @@ ENV_VARS="BASE_URL=${SERVICE_URL},LOG_LEVEL=DEBUG,PLANNER_IMPL=llm,EXECUTOR_URL=
 if [[ -n "$OPENAI_PROJECT" ]]; then
   ENV_VARS=",OPENAI_PROJECT=${OPENAI_PROJECT},${ENV_VARS}"
 fi
-SECRETS="OPENAI_API_KEY=openai-api-key:latest,TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,WEBHOOK_SECRET=telegram-webhook-secret:latest"
+SECRETS="OPENAI_API_KEY=${SECRET_OPENAI}:latest,TELEGRAM_BOT_TOKEN=${SECRET_TELEGRAM}:latest,WEBHOOK_SECRET=${SECRET_WEBHOOK}:latest"
 if [[ -n "$EXECUTOR_TOKEN" ]]; then
   ENV_VARS="${ENV_VARS},EXECUTOR_TOKEN=${EXECUTOR_TOKEN}"
 fi

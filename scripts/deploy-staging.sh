@@ -31,7 +31,8 @@ if [[ -n "$SERVICE_URL" ]]; then
   BASE_ENV="BASE_URL=${SERVICE_URL},${BASE_ENV}"
 fi
 
-SECRETS="OPENAI_API_KEY=openai-api-key:latest,TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,WEBHOOK_SECRET=telegram-webhook-secret:latest"
+# staging secrets (use separate keys)
+SECRETS="OPENAI_API_KEY=${SECRET_OPENAI:-openai-api-key-stg}:latest,TELEGRAM_BOT_TOKEN=${SECRET_TELEGRAM:-telegram-bot-token-stg}:latest,WEBHOOK_SECRET=${SECRET_WEBHOOK:-telegram-webhook-secret-stg}:latest"
 
 echo "Applying envs to $SERVICE (may create revision)…"
 gcloud run services update "$SERVICE" --region "$REGION" \
