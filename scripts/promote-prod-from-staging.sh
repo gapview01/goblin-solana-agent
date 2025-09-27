@@ -66,6 +66,18 @@ if [[ -n "$PROD_URL" ]]; then
     --update-env-vars "BASE_URL=${PROD_URL}" >/dev/null
 fi
 
+# Ensure runtime SA can read prod secrets (idempotent)
+PROJECT_ID=$(gcloud config get-value project 2>/dev/null || true)
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+RUNTIME_SA_DEFAULT="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+RUNTIME_SA="${RUNTIME_SA:-$RUNTIME_SA_DEFAULT}"
+for S in ${SECRET_OPENAI} ${SECRET_TELEGRAM} ${SECRET_WEBHOOK}; do
+  echo "Granting secretAccessor on $S to $RUNTIME_SA (idempotent)…"
+  gcloud secrets add-iam-policy-binding "$S" \
+    --member="serviceAccount:${RUNTIME_SA}" \
+    --role="roles/secretmanager.secretAccessor" >/dev/null || true
+done
+
 echo "Promotion complete. To rollback: ./scripts/rollback-prod.sh"
 
 

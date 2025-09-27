@@ -17,6 +17,16 @@ PLANNER_TIMEOUT_SEC="${PLANNER_TIMEOUT_SEC:-8}"
 
 echo "Deploying STAGING service: $SERVICE ($REGION)"
 
+# Resolve project info and runtime service account
+PROJECT_ID="$(gcloud config get-value project 2>/dev/null || true)"
+if [[ -z "$PROJECT_ID" ]]; then
+  echo "gcloud project not set; set it with: gcloud config set project <PROJECT_ID>"; exit 1
+fi
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+RUNTIME_SA_DEFAULT="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+RUNTIME_SA="${RUNTIME_SA:-$RUNTIME_SA_DEFAULT}"
+echo "Runtime Service Account: $RUNTIME_SA"
+
 # Resolve current URL if service exists
 SERVICE_URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
 
@@ -37,7 +47,8 @@ SECRETS="OPENAI_API_KEY=${SECRET_OPENAI:-openai-api-key-stg}:latest,TELEGRAM_BOT
 echo "Applying envs to $SERVICE (may create revision)…"
 gcloud run services update "$SERVICE" --region "$REGION" \
   --update-env-vars "$BASE_ENV" \
-  --set-secrets "$SECRETS" || true
+  --set-secrets "$SECRETS" \
+  --service-account "$RUNTIME_SA" || true
 
 echo "Building & deploying source to STAGING…"
 gcloud run deploy "$SERVICE" \
@@ -50,7 +61,8 @@ gcloud run deploy "$SERVICE" \
   --cpu=1 \
   --memory=512Mi \
   --set-env-vars "$BASE_ENV" \
-  --set-secrets "$SECRETS"
+  --set-secrets "$SECRETS" \
+  --service-account "$RUNTIME_SA"
 
 # Read the final URL and ensure BASE_URL is set accordingly
 SERVICE_URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"
@@ -60,6 +72,14 @@ if [[ -n "$SERVICE_URL" ]]; then
   gcloud run services update "$SERVICE" --region "$REGION" \
     --update-env-vars "BASE_URL=${SERVICE_URL}" >/dev/null
 fi
+
+# Ensure runtime SA can access staging secrets
+for S in ${SECRET_OPENAI:-openai-api-key-stg} ${SECRET_TELEGRAM:-telegram-bot-token-stg} ${SECRET_WEBHOOK:-telegram-webhook-secret-stg}; do
+  echo "Granting secretAccessor on $S to $RUNTIME_SA (idempotent)…"
+  gcloud secrets add-iam-policy-binding "$S" \
+    --member="serviceAccount:${RUNTIME_SA}" \
+    --role="roles/secretmanager.secretAccessor" >/dev/null || true
+done
 
 echo "Staging deploy complete. URL: $SERVICE_URL"
 
