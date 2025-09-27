@@ -110,6 +110,32 @@ def _fmt_list_or_str(x) -> str:
         return x
     return ""
 
+def _emojiize_summary(summary: str) -> list[str]:
+    """Best-effort: turn free-form summary into emoji sub-bullets.
+    Returns a list of lines (each already prefixed with an emoji).
+    """
+    try:
+        import re as _re
+        raw_lines = [s.strip() for s in _re.split(r"[\n\r]+", summary or "") if s.strip()]
+        out: list[str] = []
+        for line in raw_lines:
+            norm = line
+            # Drop leading dash/bullet characters if present
+            if norm[:1] in {"-", "•", "–", "—"}:
+                norm = norm[1:].strip(" -–—\t")
+            low = norm.lower()
+            if any(k in low for k in ("strategies", "generated")):
+                out.append(f"• 🧮 {norm}")
+            elif any(k in low for k in ("using", "sol", "buffer")):
+                out.append(f"• 💰 {norm}")
+            elif any(k in low for k in ("frame", "conservative", "standard", "aggressive")):
+                out.append(f"• 🧩 {norm}")
+            else:
+                out.append(f"• 📌 {norm}")
+        return out
+    except Exception:
+        return [f"• 📋 {summary}"]
+
 def _quick_plan_json(goal: str) -> str:
     """Very fast minimal JSON plan used on timeouts/errors to keep UX snappy."""
     fallback = {
@@ -515,7 +541,9 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     goal_rewrite = understanding.get("goal_rewrite") or goal
     brief.append(f"🧠 <b>Goal:</b> {html.escape(goal_rewrite)}")
     if summary:
-        brief.append(f"📋 <b>Summary:</b> {html.escape(summary)}")
+        brief.append("📋 <b>Summary:</b>")
+        for line in _emojiize_summary(str(summary)):
+            brief.append(html.escape(line))
 
     if token_candidates:
         brief.append("🎯 <b>Candidates:</b>")
