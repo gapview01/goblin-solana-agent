@@ -92,13 +92,8 @@ async def reconcile_webhook(app: Application):
     except Exception as err:
         logging.exception("Webhook reconcile failed; continuing anyway: %s", err)
 
-# Build the bot app
-app = (
-    Application.builder()
-    .token(TOKEN)
-    .post_init(reconcile_webhook)
-    .build()
-)
+# Build the bot app (defer bot network operations until after HTTP server is ready)
+app = Application.builder().token(TOKEN).build()
 
 # ---------- helpers
 
@@ -917,6 +912,12 @@ def add_handlers(a: Application):
     a.add_handler(CommandHandler("stake",   stake_cmd))
     a.add_handler(CommandHandler("unstake", unstake_cmd))
     a.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
+    # Reconcile webhook only after handlers are in place
+    try:
+        a.post_init(reconcile_webhook)  # type: ignore[attr-defined]
+    except Exception:
+        # Older PTB versions may not expose post_init setter; reconcile later in main()
+        pass
 
 # ---------- run (blocking; PTB manages the event loop)
 def main():
