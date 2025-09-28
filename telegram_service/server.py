@@ -1,5 +1,6 @@
 # telegram_service/server.py
 import os, logging, inspect, math, html, json, time, re, asyncio
+import threading
 import httpx
 from httpx import HTTPStatusError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -95,6 +96,30 @@ async def reconcile_webhook(app: Application):
 # Build the bot app (defer bot network operations until after HTTP server is ready)
 app = Application.builder().token(TOKEN).build()
 IS_PROVISIONAL_BASE = bool(BASE_URL) and ("invalid" in BASE_URL.lower())
+
+# --- minimal health server to bind PORT immediately for Cloud Run startup probe
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        if self.path in ("/", "/_ah/health", "/healthz"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def start_health_server(port: int):
+    def _run():
+        try:
+            server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+            server.serve_forever()
+        except Exception as e:
+            logging.warning("health server stopped: %s", e)
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
 
 # ---------- helpers
 
@@ -923,6 +948,12 @@ def add_handlers(a: Application):
 
 # ---------- run (blocking; PTB manages the event loop)
 def main():
+    # Start minimal health server first so Cloud Run sees port 8080 bound
+    try:
+        start_health_server(PORT)
+    except Exception:
+        logging.exception("failed to start health server (continuing)")
+
     add_handlers(app)
     logging.info("Planner wired? %s from %s", llm_plan is not None, getattr(llm_plan, "__module__", None))
     if BASE_URL:
