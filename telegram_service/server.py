@@ -157,6 +157,13 @@ def _emojiize_summary(summary: str) -> list[str]:
     except Exception:
         return [f"• 📋 {summary}"]
 
+TELEGRAM_SAFE_CHARS = 3500  # keep well below Telegram 4096 limit with HTML
+
+def _send_in_chunks(update: Update, text: str, parse_mode=ParseMode.HTML):
+    for i in range(0, len(text), TELEGRAM_SAFE_CHARS):
+        chunk = text[i:i+TELEGRAM_SAFE_CHARS]
+        update.message.reply_text(chunk, parse_mode=parse_mode, disable_web_page_preview=True)
+
 def _quick_plan_json(goal: str) -> str:
     """Very fast minimal JSON plan used on timeouts/errors to keep UX snappy."""
     fallback = {
@@ -557,12 +564,12 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     default_option = (plan.get("default_option") or "").strip()
     actions = plan.get("actions") or []
 
-    # Build briefing text
+    # Build briefing text (Executive Summary first)
     brief = []
     goal_rewrite = understanding.get("goal_rewrite") or goal
     brief.append(f"🧠 <b>Goal:</b> {html.escape(goal_rewrite)}")
     if summary:
-        brief.append("📋 <b>Summary:</b>")
+        brief.append("📋 <b>Executive Summary:</b>")
         for line in _emojiize_summary(str(summary)):
             brief.append(html.escape(line))
 
@@ -623,7 +630,11 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 emoji = "📈" if "impact" in g else ("💰" if "mcap" in g else "🎯")
                 brief.append(f"• {emoji} {g}")
 
-    await update.message.reply_text("\n".join(brief), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    full_text = "\n".join(brief)
+    if len(full_text) > TELEGRAM_SAFE_CHARS:
+        _send_in_chunks(update, full_text)
+    else:
+        await update.message.reply_text(full_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
     # ---- Option CTAs (dynamic names)
     if options:
