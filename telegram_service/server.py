@@ -508,19 +508,16 @@ def _options_cta(options: list[dict]) -> list[list[InlineKeyboardButton]]:
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logging.info("START command")
     await update.message.reply_text(
-        "🧠 Goblin Planner is ready ✅\n\n"
-        "How to start:\n"
-        "• /plan <describe your goal in plain English>\n"
-        "  e.g. /plan grow 1 SOL to 10 SOL in 6 months\n\n"
-        "Quick actions:\n"
-        "• /balance [TOKEN] — 💰 show wallet balance\n"
-        "• /quote <FROM> <TO> <AMOUNT> [slip_bps] — 🧮 preview swap\n"
-        "• /swap <FROM> <TO> <AMOUNT> [slip_bps] — 🔄 execute swap\n"
-        "• /stake <TOKEN> <AMOUNT> — 🪙 stake LST/LRT\n"
-        "• /unstake <TOKEN> <AMOUNT> — 🪙 unstake\n\n"
-        "What you’ll get:\n"
-        "• Executive Summary first, then the full rich plan (chunked if long).\n"
-        "• Strategy pillars, actions, and risk controls formatted clearly."
+        "👾 GoblinBot Ready ✅\n\n"
+        "/check (balance, quote)\n"
+        "/do (swap, stake, unstake)\n"
+        "/grow (plan, scale, earn)\n\n"
+        "🌱 Grow Options:\n"
+        "- 🧠 /plan — set a goal & get a plan (Takes ~7 mins ⌛ 😄)\n"
+        "- 📈 /scale — grow 1 SOL to 10 SOL\n"
+        "- ✅ /earn — earn yield on your SOL this month\n\n"
+        "🧠  Set a goal & get a plan.\n"
+        "Use /plan <describe your goals in plain English>"
     )
 
 async def ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
