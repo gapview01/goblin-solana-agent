@@ -47,6 +47,7 @@ logging.basicConfig(
 
 # --- tiny in-memory plan cache per chat (for option CTAs) ---
 _LAST_PLAN: dict[int, dict] = {}   # chat_id -> plan dict
+_INTAKE_STATE: dict[int, dict] = {}  # chat_id -> {idx:int, answers:dict}
 
 # --- Planner import (prefer llm_planner, fallback to legacy, then demo)
 llm_plan = None
@@ -120,6 +121,38 @@ def start_health_server(port: int):
             logging.warning("health server stopped: %s", e)
     t = threading.Thread(target=_run, daemon=True)
     t.start()
+
+async def intake_followup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not isinstance(chat_id, int) or chat_id not in _INTAKE_STATE:
+        return
+    state = _INTAKE_STATE[chat_id]
+    idx = state.get("idx", 0)
+    ans = state.setdefault("answers", {})
+    text = (update.message.text or "").strip()
+    if idx == 0:
+        ans["goal"] = text
+        state["idx"] = 1
+        await update.message.reply_text("2) Any liquidity needs or upcoming large cash needs?")
+        return
+    if idx == 1:
+        ans["liquidity"] = text
+        state["idx"] = 2
+        await update.message.reply_text("3) Risk tolerance (low/medium/high) and max drawdown you can accept?")
+        return
+    if idx == 2:
+        ans["risk"] = text
+        # Build a succinct goal for the planner
+        goal = ans.get("goal", "")
+        if ans.get("liquidity"):
+            goal += f" | Liquidity: {ans['liquidity']}"
+        if ans.get("risk"):
+            goal += f" | Risk: {ans['risk']}"
+        del _INTAKE_STATE[chat_id]
+        await update.message.reply_text("🧠 Thanks — generating your plan…")
+        # Reuse the normal planner path
+        ctx.args = [goal]
+        await plan_cmd(update, ctx)
 
 # ---------- helpers
 
@@ -550,7 +583,13 @@ async def plan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text or ""
     goal = raw.partition(" ")[2].strip() or " ".join(ctx.args).strip()
     if not goal:
-        await update.message.reply_text("Usage: /plan <goal>\nExample: /plan grow 1 SOL to 10 SOL")
+        # Start interactive intake session
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if not isinstance(chat_id, int):
+            await update.message.reply_text("Please try again in a regular chat context.")
+            return
+        _INTAKE_STATE[chat_id] = {"idx": 0, "answers": {}}
+        await update.message.reply_text("🧠 Let’s design your plan. Answer a few quick questions.\n\n1) What’s your primary goal and time horizon?")
         return
     try:
         await ctx.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
@@ -968,6 +1007,8 @@ def add_handlers(a: Application):
     a.add_handler(CommandHandler("do", do_menu))
     a.add_handler(CommandHandler("grow", grow_menu))
     a.add_handler(CommandHandler("plan", plan_cmd))
+    # Intake follow-ups: capture free-text replies when an intake session is active
+    a.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), intake_followup))
     a.add_handler(CallbackQueryHandler(on_option_button, pattern=r"^opt:"))  # option CTAs
     a.add_handler(CallbackQueryHandler(on_action_button, pattern=r"^run:"))  # primitive CTAs
     a.add_handler(CommandHandler("balance", balance_cmd))
