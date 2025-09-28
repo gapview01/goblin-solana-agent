@@ -94,6 +94,7 @@ async def reconcile_webhook(app: Application):
 
 # Build the bot app (defer bot network operations until after HTTP server is ready)
 app = Application.builder().token(TOKEN).build()
+IS_PROVISIONAL_BASE = bool(BASE_URL) and ("invalid" in BASE_URL.lower())
 
 # ---------- helpers
 
@@ -913,11 +914,12 @@ def add_handlers(a: Application):
     a.add_handler(CommandHandler("unstake", unstake_cmd))
     a.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
     # Reconcile webhook only after handlers are in place
-    try:
-        a.post_init(reconcile_webhook)  # type: ignore[attr-defined]
-    except Exception:
-        # Older PTB versions may not expose post_init setter; reconcile later in main()
-        pass
+    if BASE_URL and not IS_PROVISIONAL_BASE:
+        try:
+            a.post_init(reconcile_webhook)  # type: ignore[attr-defined]
+        except Exception:
+            # Older PTB versions may not expose post_init setter; reconcile in main()
+            pass
 
 # ---------- run (blocking; PTB manages the event loop)
 def main():
@@ -926,8 +928,7 @@ def main():
     if BASE_URL:
         url_path = f"webhook/{WEBHOOK_SECRET}"
         # If BASE_URL is provisional/unknown, start the HTTP server without setting the Telegram webhook yet
-        is_provisional = "invalid" in BASE_URL.lower()
-        if is_provisional:
+        if IS_PROVISIONAL_BASE:
             logging.info("Starting webhook HTTP server (provisional BASE_URL); deferring Telegram setWebhook")
             app.run_webhook(
                 listen="0.0.0.0",
