@@ -948,27 +948,25 @@ def add_handlers(a: Application):
 
 # ---------- run (blocking; PTB manages the event loop)
 def main():
-    # Start minimal health server first so Cloud Run sees port 8080 bound
-    try:
-        start_health_server(PORT)
-    except Exception:
-        logging.exception("failed to start health server (continuing)")
+    # If we only have a provisional BASE_URL, bind a minimal health server and wait.
+    if IS_PROVISIONAL_BASE:
+        try:
+            start_health_server(PORT)
+            logging.info("Provisional startup: health server running on :%s; awaiting BASE_URL update", PORT)
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            return
+        except Exception:
+            logging.exception("failed to run provisional health loop")
+            return
 
     add_handlers(app)
     logging.info("Planner wired? %s from %s", llm_plan is not None, getattr(llm_plan, "__module__", None))
     if BASE_URL:
         url_path = f"webhook/{WEBHOOK_SECRET}"
         # If BASE_URL is provisional/unknown, start the HTTP server without setting the Telegram webhook yet
-        if IS_PROVISIONAL_BASE:
-            logging.info("Starting webhook HTTP server (provisional BASE_URL); deferring Telegram setWebhook")
-            app.run_webhook(
-                listen="0.0.0.0",
-                port=PORT,
-                url_path=url_path,
-                secret_token=WEBHOOK_SECRET,
-                drop_pending_updates=True,
-            )
-        else:
+        if not IS_PROVISIONAL_BASE:
             webhook_url = f"{BASE_URL}/{url_path}"
             logging.info("Starting webhook server at %s", webhook_url)
             app.run_webhook(
