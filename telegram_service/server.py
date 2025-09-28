@@ -511,14 +511,36 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "👾 GoblinBot Ready ✅\n\n"
         "/check (balance, quote)\n"
         "/do (swap, stake, unstake)\n"
-        "/grow (plan, scale, earn)\n\n"
-        "🌱 Grow Options:\n"
+        "/grow (plan, scale, earn)"
+    )
+
+async def check_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "💰  Check Options:\n"
+        "- 👛 /balance — see tokens in your wallet\n"
+        "- 📊 /quote — estimate what you’d receive on a swap"
+    )
+    await update.message.reply_text(text)
+
+async def do_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🛠️  Do Options:\n"
+        "- 🔁 /swap — trade one token for another\n"
+        "- 🌱 /stake — deposit to earn\n"
+        "- 📤 /unstake — withdraw your deposit"
+    )
+    await update.message.reply_text(text)
+
+async def grow_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🌱  Grow Options:\n"
         "- 🧠 /plan — set a goal & get a plan (Takes ~7 mins ⌛ 😄)\n"
         "- 📈 /scale — grow 1 SOL to 10 SOL\n"
         "- ✅ /earn — earn yield on your SOL this month\n\n"
         "🧠  Set a goal & get a plan.\n"
         "Use /plan <describe your goals in plain English>"
     )
+    await update.message.reply_text(text)
 
 async def ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("pong")
@@ -942,6 +964,9 @@ async def unstake_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def add_handlers(a: Application):
     a.add_handler(CommandHandler("start", start))
     a.add_handler(CommandHandler("ping", ping))
+    a.add_handler(CommandHandler("check", check_menu))
+    a.add_handler(CommandHandler("do", do_menu))
+    a.add_handler(CommandHandler("grow", grow_menu))
     a.add_handler(CommandHandler("plan", plan_cmd))
     a.add_handler(CallbackQueryHandler(on_option_button, pattern=r"^opt:"))  # option CTAs
     a.add_handler(CallbackQueryHandler(on_action_button, pattern=r"^run:"))  # primitive CTAs
